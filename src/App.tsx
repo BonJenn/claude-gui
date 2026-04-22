@@ -124,6 +124,11 @@ const REPLAY_SKIP = new Set([
   "system",
 ]);
 
+// How many recent messages to show when opening a session. Big enough to
+// cover the recent context of most turns, small enough that parsing +
+// rendering is essentially free on click.
+const SESSION_TAIL_LIMIT = 200;
+
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -392,14 +397,14 @@ function App() {
     refreshBranches(cwd);
   }, [cwd, refreshBranches]);
 
-  // Pre-warm the cache for recent sessions in the background so the first
-  // click on any of them is instant. Runs up to 4 concurrent loads — Tauri
-  // handles concurrent invokes on its async runtime.
+  // Pre-warm every session's cache using the cheap tail endpoint so the
+  // first click on ANY session is as instant as the second. Tail reads are
+  // small and parse fast, so prewarming all 170+ sessions is practical.
   useEffect(() => {
     if (sessions.length === 0) return;
     let cancelled = false;
-    const queue = sessions.slice(0, 40);
-    const concurrency = 4;
+    const queue = sessions.slice();
+    const concurrency = 6;
 
     const prewarmOne = async (s: SessionInfo) => {
       if (cancelled) return;
@@ -407,8 +412,8 @@ function App() {
       if (existing && existing.mtime_ms === s.mtime_ms) return;
       try {
         const events = await invoke<Array<Record<string, unknown>>>(
-          "load_session",
-          { sessionId: s.id, cwd: s.cwd },
+          "load_session_tail",
+          { sessionId: s.id, cwd: s.cwd, limit: SESSION_TAIL_LIMIT },
         );
         if (cancelled) return;
         const { entries, toolUseMap } = buildHistory(events);
@@ -885,9 +890,11 @@ function App() {
 
     if (!cacheHit) {
       try {
+        // Fetch only the tail — it's what we need to render immediately and
+        // parses/serializes in tens of ms vs hundreds for a full load.
         const events = await invoke<Array<Record<string, unknown>>>(
-          "load_session",
-          { sessionId, cwd: useCwd },
+          "load_session_tail",
+          { sessionId, cwd: useCwd, limit: SESSION_TAIL_LIMIT },
         );
         if (!isLatest()) return;
         const { entries: history, toolUseMap } = buildHistory(events);
