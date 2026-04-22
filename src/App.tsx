@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -10,9 +10,15 @@ import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { compileMarkdown } from "./markdown";
 import "./App.css";
 
-type TextBlock = { type: "text"; text: string; _streaming?: boolean };
+// Hoisted so they're stable across renders — creating them fresh each time
+// would break react-markdown's internal caches and blow up re-render cost.
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS = [rehypeHighlight];
+
+type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
 type ToolUseBlock = {
   type: "tool_use";
   id: string;
@@ -26,7 +32,12 @@ type ToolResultBlock = {
   content: string | Array<{ type: string; text?: string }>;
   is_error?: boolean;
 };
-type ThinkingBlock = { type: "thinking"; thinking: string; _streaming?: boolean };
+type ThinkingBlock = {
+  type: "thinking";
+  thinking: string;
+  _streaming?: boolean;
+  _html?: string;
+};
 type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
 type ToolMeta = { name: string; input: unknown };
@@ -124,6 +135,11 @@ const REPLAY_SKIP = new Set([
   "system",
 ]);
 
+// How many recent messages to show when opening a session. Big enough to
+// cover the recent context of most turns, small enough that parsing +
+// rendering is essentially free on click.
+const SESSION_TAIL_LIMIT = 200;
+
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -145,7 +161,17 @@ function buildHistory(events: Array<Record<string, unknown>>): {
     if (t === "assistant") {
       const msg = ev.message as { id?: string; content?: Block[] } | undefined;
       const msgId = msg?.id ?? randomId();
-      const blocks = msg?.content ?? [];
+      const blocks = (msg?.content ?? []).map((b): Block => {
+        if (b.type === "text") {
+          const tb = b as TextBlock;
+          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+        }
+        if (b.type === "thinking") {
+          const thb = b as ThinkingBlock;
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+        }
+        return b;
+      });
       for (const b of blocks) {
         if (b.type === "tool_use") {
           const tu = b as ToolUseBlock;
@@ -315,6 +341,21 @@ function App() {
   // start another (new / resumed session). The claude-done event checks this
   // so it doesn't show a stale "session ended" sysline mid-switch.
   const switchingSessionRef = useRef(false);
+  // Parsed-history cache: flipping back to a session you've already opened
+  // is instant. Keyed by session_id; the mtime_ms from list_sessions is used
+  // to invalidate when the session file has grown on disk.
+  const sessionCacheRef = useRef<
+    Map<
+      string,
+      { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+    >
+  >(new Map());
+  // Tracks which resume attempt is latest so an older slow load doesn't
+  // clobber a newer one if the user clicks quickly.
+  const resumeTokenRef = useRef(0);
+  // Set once the user actually clicks a session. Prewarm watches this to
+  // yield IPC bandwidth for the user-initiated load.
+  const userInteractedRef = useRef(false);
 
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
@@ -379,6 +420,54 @@ function App() {
   useEffect(() => {
     refreshBranches(cwd);
   }, [cwd, refreshBranches]);
+
+  // Pre-warm every session's cache using the cheap tail endpoint so the
+  // first click on ANY session is as instant as the second. Paused the
+  // moment the user clicks a session so their click doesn't queue behind
+  // bulk prewarm IPCs.
+  useEffect(() => {
+    if (sessions.length === 0) return;
+    let cancelled = false;
+    const queue = sessions.slice();
+    const concurrency = 2;
+
+    const prewarmOne = async (s: SessionInfo) => {
+      if (cancelled || userInteractedRef.current) return;
+      const existing = sessionCacheRef.current.get(s.id);
+      if (existing && existing.mtime_ms === s.mtime_ms) return;
+      try {
+        const events = await invoke<Array<Record<string, unknown>>>(
+          "load_session_tail",
+          { sessionId: s.id, cwd: s.cwd, limit: SESSION_TAIL_LIMIT },
+        );
+        if (cancelled || userInteractedRef.current) return;
+        const { entries, toolUseMap } = buildHistory(events);
+        sessionCacheRef.current.set(s.id, {
+          entries,
+          toolUseMap,
+          mtime_ms: s.mtime_ms,
+        });
+      } catch {
+        // ignore — a missing/unreadable session just means no prewarm for it
+      }
+    };
+
+    const idx = { i: 0 };
+    const worker = async () => {
+      while (!cancelled && !userInteractedRef.current) {
+        const i = idx.i++;
+        if (i >= queue.length) return;
+        await prewarmOne(queue[i]);
+      }
+    };
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < concurrency; w++) workers.push(worker());
+    Promise.all(workers).catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessions]);
 
   const handleAtBottomChange = useCallback((atBottom: boolean) => {
     setStuckToBottom((prev) => (prev === atBottom ? prev : atBottom));
@@ -463,8 +552,19 @@ function App() {
 
     if (ev.type === "assistant") {
       const msgId = ev.message.id;
-      recordToolUses(ev.message.content);
-      for (const b of ev.message.content) {
+      const blocks = ev.message.content.map((b): Block => {
+        if (b.type === "text") {
+          const tb = b as TextBlock;
+          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+        }
+        if (b.type === "thinking") {
+          const thb = b as ThinkingBlock;
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+        }
+        return b;
+      });
+      recordToolUses(blocks);
+      for (const b of blocks) {
         if (b.type === "text") {
           autoDetectUrl((b as TextBlock).text ?? "");
         }
@@ -475,12 +575,12 @@ function App() {
         );
         if (idx >= 0) {
           const next = es.slice();
-          next[idx] = { kind: "assistant", id: msgId, blocks: ev.message.content };
+          next[idx] = { kind: "assistant", id: msgId, blocks };
           return next;
         }
         return [
           ...es,
-          { kind: "assistant", id: msgId || randomId(), blocks: ev.message.content },
+          { kind: "assistant", id: msgId || randomId(), blocks },
         ];
       });
       return;
@@ -668,10 +768,14 @@ function App() {
         // finalized (markdown-rendered) view.
         const cleaned: Block = { ...b } as Block;
         if (cleaned.type === "text") {
-          delete (cleaned as TextBlock)._streaming;
+          const tb = cleaned as TextBlock;
+          delete tb._streaming;
+          tb._html = compileMarkdown(tb.text ?? "");
         }
         if (cleaned.type === "thinking") {
-          delete (cleaned as ThinkingBlock)._streaming;
+          const thb = cleaned as ThinkingBlock;
+          delete thb._streaming;
+          thb._html = compileMarkdown(thb.thinking ?? "");
         }
         if (cleaned.type === "tool_use") {
           const tu = cleaned as ToolUseBlock;
@@ -764,28 +868,64 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
-    // Restore the original model so the resumed turn keeps the same
-    // capabilities / context window the conversation started with.
+    const t0 = performance.now();
+    const token = ++resumeTokenRef.current;
+    const isLatest = () => resumeTokenRef.current === token;
+    userInteractedRef.current = true;
+
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
-    if (sessionModel) setModel(sessionModel);
+    const mtime = info?.mtime_ms ?? 0;
 
-    // Flag the switch so the about-to-die subprocess's claude-done event
-    // doesn't print a stale "session ended".
+    const cached = sessionCacheRef.current.get(sessionId);
+    const cacheHit = cached && cached.mtime_ms === mtime && mtime > 0;
+
+    // ---------- Single synchronous batch: swap entire view in one render ----------
+    // Everything below runs before any await so React 18 batches them into a
+    // single commit. If it's a cache hit, the transcript hops directly from
+    // the previous session's entries to the resumed ones — no empty flash,
+    // no startTransition delay, no "loading…" placeholder.
     switchingSessionRef.current = true;
-
-    // Instant visual feedback — all state flips BEFORE any await so the
-    // transcript clears and the sidebar highlight updates in the same frame.
-    resetSessionState();
+    if (sessionModel) setModel(sessionModel);
     setSessionOn(false);
     setActiveSessionId(sessionId);
-    setResumingId(sessionId);
     if (sessionCwd) setCwd(sessionCwd);
+    setStderrLines([]);
+    setSessionMeta(null);
+    setBusy(false);
+    setStuckToBottom(true);
+    setHasNewBelow(false);
+    setPreviewOpen(false);
+    setPreviewUrl("");
+    seenUrlsRef.current.clear();
+    streamingIdRef.current = null;
+
+    if (cacheHit) {
+      toolUseMapRef.current = new Map(cached!.toolUseMap);
+      setEntries([
+        ...cached!.entries,
+        { kind: "system", id: randomId(), text: "— resumed —" },
+      ]);
+      setResumingId(null);
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({
+          index: "LAST",
+          align: "end",
+          behavior: "auto",
+        });
+        const dt = performance.now() - t0;
+        // eslint-disable-next-line no-console
+        console.log(`[resume:cache-hit] ${sessionId.slice(0, 8)} ${dt.toFixed(1)}ms to first paint`);
+      });
+    } else {
+      toolUseMapRef.current = new Map();
+      setEntries([]);
+      setResumingId(sessionId);
+    }
 
     const useCwd = sessionCwd || cwd;
 
-    // start_session on the Rust side already kills any prior subprocess,
-    // so we skip awaiting stopSession. Fire load and start in parallel.
+    // Kick off the claude subprocess in parallel — it boots while we load.
     const startPromise = invoke("start_session", {
       cwd: useCwd,
       permissionMode,
@@ -793,50 +933,60 @@ function App() {
       resumeId: sessionId,
     });
 
-    try {
-      const events = await invoke<Array<Record<string, unknown>>>("load_session", {
-        sessionId,
-        cwd: useCwd,
-      });
-      const { entries: history, toolUseMap } = buildHistory(events);
-      toolUseMapRef.current = toolUseMap;
-      // startTransition lets the click feedback + loading indicator paint
-      // first, then commits the big history render without blocking input.
-      startTransition(() => {
-        setEntries((es) => [
+    if (!cacheHit) {
+      try {
+        // Fetch only the tail — it's what we need to render immediately and
+        // parses/serializes in tens of ms vs hundreds for a full load.
+        const events = await invoke<Array<Record<string, unknown>>>(
+          "load_session_tail",
+          { sessionId, cwd: useCwd, limit: SESSION_TAIL_LIMIT },
+        );
+        if (!isLatest()) return;
+        const { entries: history, toolUseMap } = buildHistory(events);
+        sessionCacheRef.current.set(sessionId, {
+          entries: history,
+          toolUseMap,
+          mtime_ms: mtime,
+        });
+        toolUseMapRef.current = new Map(toolUseMap);
+        setEntries([
           ...history,
           { kind: "system", id: randomId(), text: "— resumed —" },
-          ...es,
         ]);
-      });
-      // Start at the bottom — the last exchange is where users want to pick up.
-      requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({
-          index: "LAST",
-          align: "end",
-          behavior: "auto",
+        requestAnimationFrame(() => {
+          virtuosoRef.current?.scrollToIndex({
+            index: "LAST",
+            align: "end",
+            behavior: "auto",
+          });
         });
-      });
-    } catch (e) {
-      setEntries((es) => [
-        ...es,
-        { kind: "system", id: randomId(), text: `failed to load history: ${e}` },
-      ]);
-    } finally {
-      setResumingId(null);
+      } catch (e) {
+        if (isLatest()) {
+          setEntries((es) => [
+            ...es,
+            { kind: "system", id: randomId(), text: `failed to load history: ${e}` },
+          ]);
+        }
+      } finally {
+        if (isLatest()) setResumingId(null);
+      }
     }
 
     try {
       await startPromise;
-      setSessionOn(true);
-      setTimeout(() => inputRef.current?.focus(), 0);
+      if (isLatest()) {
+        setSessionOn(true);
+        setTimeout(() => inputRef.current?.focus(), 0);
+      }
     } catch (e) {
-      setEntries((es) => [
-        ...es,
-        { kind: "system", id: randomId(), text: `failed to start: ${e}` },
-      ]);
+      if (isLatest()) {
+        setEntries((es) => [
+          ...es,
+          { kind: "system", id: randomId(), text: `failed to start: ${e}` },
+        ]);
+      }
     } finally {
-      switchingSessionRef.current = false;
+      if (isLatest()) switchingSessionRef.current = false;
     }
   }
 
@@ -907,6 +1057,7 @@ function App() {
         sessions={sessions}
         activeId={activeSessionId}
         loading={sessionsLoading}
+        resumingId={resumingId}
         onResume={resumeSession}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
@@ -1031,6 +1182,12 @@ function App() {
             </div>
           ) : (
             <Virtuoso
+              // Re-mount per session so the new transcript shows at its
+              // initialTopMostItemIndex synchronously, skipping the diff &
+              // measurement settle when data identity changes. Items render
+              // via precompiled HTML (dangerouslySetInnerHTML), so the
+              // remount cost is trivial — just DOM node creation.
+              key={activeSessionId ?? "new"}
               ref={virtuosoRef}
               className="transcript"
               data={entries}
@@ -1043,8 +1200,8 @@ function App() {
               followOutput={stuckToBottom ? "auto" : false}
               atBottomStateChange={handleAtBottomChange}
               atBottomThreshold={48}
-              initialTopMostItemIndex={entries.length - 1}
-              increaseViewportBy={400}
+              initialTopMostItemIndex={Math.max(0, entries.length - 1)}
+              increaseViewportBy={200}
               components={{
                 Footer: busy ? TypingIndicator : undefined,
               }}
@@ -1503,6 +1660,7 @@ function Sidebar({
   sessions,
   activeId,
   loading,
+  resumingId,
   onResume,
   onNew,
   onRefresh,
@@ -1517,6 +1675,7 @@ function Sidebar({
   sessions: SessionInfo[];
   activeId?: string;
   loading: boolean;
+  resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
   onNew: () => void;
   onRefresh: () => void;
@@ -1528,6 +1687,17 @@ function Sidebar({
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // The active session is reordered to the top of the filtered list, so
+  // snapping the sidebar to scrollTop: 0 puts it in view immediately.
+  useEffect(() => {
+    if (!activeId) return;
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTo({ top: 0, behavior: "auto" });
+  }, [activeId]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
   const projects = useMemo(() => {
@@ -1546,7 +1716,7 @@ function Sidebar({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return sessions.filter((s) => {
+    const matches = sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
       return (
@@ -1555,7 +1725,16 @@ function Sidebar({
         s.id.toLowerCase().includes(q)
       );
     });
-  }, [sessions, projectFilter, search]);
+    // Move the active session to the top of the list so the clicked
+    // conversation is immediately visible at the top.
+    if (activeId) {
+      const active = matches.find((s) => s.id === activeId);
+      if (active && matches[0]?.id !== activeId) {
+        return [active, ...matches.filter((s) => s.id !== activeId)];
+      }
+    }
+    return matches;
+  }, [sessions, projectFilter, search, activeId]);
 
   return (
     <aside className="sidebar" style={{ width }}>
@@ -1607,7 +1786,7 @@ function Sidebar({
           ))}
         </select>
       </div>
-      <div className="sessions-list">
+      <div className="sessions-list" ref={listRef}>
         {loading && filtered.length === 0 && (
           <div className="sessions-empty">loading…</div>
         )}
@@ -1622,15 +1801,30 @@ function Sidebar({
             s.context_limit > 0 ? Math.min(1, s.context_tokens / s.context_limit) : 0;
           const costBudget = 5;
           const costRatio = Math.min(1, s.total_cost_usd / costBudget);
+          const isActive = activeId === s.id;
+          const isLoading = resumingId === s.id;
           return (
-            <button
+            <div
               key={s.id}
-              className={`session-item ${activeId === s.id ? "active" : ""}`}
+              role="button"
+              tabIndex={0}
+              ref={(el) => {
+                if (el) itemRefs.current.set(s.id, el);
+                else itemRefs.current.delete(s.id);
+              }}
+              className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
               onClick={() => onResume(s.id, s.cwd)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onResume(s.id, s.cwd);
+                }
+              }}
               title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
             >
-              <div className="session-title">{s.title || "(untitled)"}</div>
-              <div className="session-project">{basename(s.cwd) || "unknown"}</div>
+              {isLoading && <span className="session-loading-bar" />}
+              <span className="session-title">{s.title || "(untitled)"}</span>
+              <span className="session-project">{basename(s.cwd) || "unknown"}</span>
               <div className="session-bar">
                 <span className="session-bar-label">ctx</span>
                 <div className="session-bar-track">
@@ -1661,7 +1855,7 @@ function Sidebar({
                 <span>{relativeTime(s.mtime_ms)}</span>
                 <span className="session-count">{s.message_count} msg</span>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -1731,6 +1925,26 @@ const linkClickHandlerRef: { current: ((url: string) => void) | null } = {
   current: null,
 };
 
+// Event-delegation handler for precompiled markdown (dangerouslySetInnerHTML
+// path). Walks up the event target to find an anchor and routes external URLs
+// through the preview handler instead of letting the webview navigate.
+function handleMarkdownClick(e: React.MouseEvent<HTMLDivElement>) {
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  const anchor = target.closest("a") as HTMLAnchorElement | null;
+  if (!anchor) return;
+  const href = anchor.getAttribute("href");
+  if (!href) return;
+  if (!/^https?:\/\//i.test(href)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (linkClickHandlerRef.current) {
+    linkClickHandlerRef.current(href);
+  } else {
+    openUrl(href).catch((err) => console.error("openUrl failed:", err));
+  }
+}
+
 const mdComponents = {
   a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
     const isExternal = !!href && /^https?:\/\//i.test(href);
@@ -1767,11 +1981,21 @@ function BlockView({ block }: { block: Block }) {
     if (tb._streaming) {
       return <StreamingText text={text} />;
     }
+    // Precompiled HTML path — no React reconciliation inside the bubble.
+    if (tb._html) {
+      return (
+        <div
+          className="block text markdown"
+          dangerouslySetInnerHTML={{ __html: tb._html }}
+          onClick={handleMarkdownClick}
+        />
+      );
+    }
     return (
       <div className="block text markdown">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
           components={mdComponents}
         >
           {text}
@@ -1783,21 +2007,34 @@ function BlockView({ block }: { block: Block }) {
   if (block.type === "thinking") {
     const tb = block as ThinkingBlock;
     const t = tb.thinking ?? "";
+    if (tb._streaming) {
+      return (
+        <details className="block thinking" open>
+          <summary>thinking</summary>
+          <pre className="thinking-stream">{t}</pre>
+        </details>
+      );
+    }
+    if (tb._html) {
+      return (
+        <details className="block thinking" open>
+          <summary>thinking</summary>
+          <div
+            className="markdown"
+            dangerouslySetInnerHTML={{ __html: tb._html }}
+            onClick={handleMarkdownClick}
+          />
+        </details>
+      );
+    }
     return (
       <details className="block thinking" open>
         <summary>thinking</summary>
-        {tb._streaming ? (
-          <pre className="thinking-stream">{t}</pre>
-        ) : (
-          <div className="markdown">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={mdComponents}
-            >
-              {t}
-            </ReactMarkdown>
-          </div>
-        )}
+        <div className="markdown">
+          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={mdComponents}>
+            {t}
+          </ReactMarkdown>
+        </div>
       </details>
     );
   }

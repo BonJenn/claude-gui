@@ -323,47 +323,116 @@ body {
 }
 
 .session-item {
-  background: transparent;
-  border: 1px solid transparent;
+  position: relative;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
   cursor: pointer;
   text-align: left;
-  color: var(--text-dim);
+  color: var(--text);
+  font: inherit;
   font-family: var(--sans);
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  transition: background 0.12s, border-color 0.12s, color 0.12s,
+    transform 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
   display: flex;
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
 }
 
 .session-item:hover {
-  background: var(--bg-elev);
-  color: var(--text);
-  border-color: var(--border);
+  background: var(--bg-elev-2);
+  border-color: var(--accent-soft);
+}
+
+.session-item:active {
+  transform: scale(0.985);
 }
 
 .session-item.active {
   background: var(--accent-soft);
-  border-color: var(--accent);
+  border-color: var(--border);
+  color: var(--text);
+  animation: session-activate 0.28s ease-out;
+}
+
+.session-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+  opacity: 0.75;
+}
+
+@keyframes session-activate {
+  0% {
+    transform: scale(0.985);
+  }
+  60% {
+    transform: scale(1.005);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.session-loading-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 50%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-position: -40% 0;
+  animation: session-loading-sweep 1s ease-in-out infinite;
+}
+
+@keyframes session-loading-sweep {
+  0% {
+    background-position: -40% 0;
+  }
+  100% {
+    background-position: 140% 0;
+  }
+}
+
+.session-item,
+.session-item .session-title,
+.session-item .session-project,
+.session-item .session-bar,
+.session-item .session-meta {
   color: var(--text);
 }
 
 .session-title {
+  display: block;
   font-size: 12.5px;
   line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
-}
-
-.session-item.active .session-title {
   color: var(--text);
 }
 
 .session-project {
+  display: block;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--accent);

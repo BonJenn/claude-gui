@@ -475,26 +475,45 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
     Ok(out)
 }
 
+// Internal event types we never surface in the transcript.
+const REPLAY_SKIP_TYPES: [&str; 6] = [
+    "queue-operation",
+    "last-prompt",
+    "ai-title",
+    "custom-title",
+    "attachment",
+    "system",
+];
+
+fn session_path(session_id: &str, cwd: &str) -> Option<PathBuf> {
+    let encoded = encode_cwd(cwd);
+    Some(
+        projects_dir()?
+            .join(encoded)
+            .join(format!("{}.jsonl", session_id)),
+    )
+}
+
+fn should_skip_line(line: &str) -> bool {
+    // Cheap string prefilter: avoids a full JSON parse for internal types.
+    // JSONL records always have `"type":"..."` as a top-level field, so this
+    // substring check is a reliable first pass.
+    for t in REPLAY_SKIP_TYPES {
+        let needle = format!("\"type\":\"{}\"", t);
+        if line.contains(&needle) {
+            return true;
+        }
+    }
+    false
+}
+
 #[tauri::command]
 fn load_session(session_id: String, cwd: String) -> Result<Vec<serde_json::Value>, String> {
-    let encoded = encode_cwd(&cwd);
-    let path = projects_dir()
-        .ok_or_else(|| "no HOME".to_string())?
-        .join(&encoded)
-        .join(format!("{}.jsonl", session_id));
+    let path = session_path(&session_id, &cwd)
+        .ok_or_else(|| "no HOME".to_string())?;
     if !path.exists() {
         return Err("session file not found".to_string());
     }
-    // Skip internal types on the Rust side — avoids shipping noise over IPC
-    // and saves JS a re-parse of every line.
-    let skip: [&str; 6] = [
-        "queue-operation",
-        "last-prompt",
-        "ai-title",
-        "custom-title",
-        "attachment",
-        "system",
-    ];
     let file = fs::File::open(&path).map_err(|e| e.to_string())?;
     use std::io::BufRead;
     let reader = std::io::BufReader::new(file);
@@ -507,18 +526,64 @@ fn load_session(session_id: String, cwd: String) -> Result<Vec<serde_json::Value
         if line.trim().is_empty() {
             continue;
         }
+        if should_skip_line(&line) {
+            continue;
+        }
         let v: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
         if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
-            if skip.contains(&t) {
+            if REPLAY_SKIP_TYPES.contains(&t) {
                 continue;
             }
         }
         out.push(v);
     }
     Ok(out)
+}
+
+/// Faster path for the "open a session" click: returns the last `limit`
+/// renderable events without parsing everything before them. Backward line
+/// iteration + a substring prefilter keep this in the tens of ms even for
+/// 10 MB session files.
+#[tauri::command]
+fn load_session_tail(
+    session_id: String,
+    cwd: String,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let path = session_path(&session_id, &cwd)
+        .ok_or_else(|| "no HOME".to_string())?;
+    if !path.exists() {
+        return Err("session file not found".to_string());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let cap = limit.max(1);
+    let mut rev: Vec<serde_json::Value> = Vec::with_capacity(cap);
+    for line in content.lines().rev() {
+        if rev.len() >= cap {
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if should_skip_line(line) {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
+            if REPLAY_SKIP_TYPES.contains(&t) {
+                continue;
+            }
+        }
+        rev.push(v);
+    }
+    rev.reverse();
+    Ok(rev)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -538,7 +603,8 @@ pub fn run() {
             list_branches,
             switch_branch,
             preview_navigate,
-            window_top_inset
+            window_top_inset,
+            load_session_tail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
