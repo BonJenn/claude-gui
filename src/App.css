@@ -785,6 +785,15 @@ input:disabled, select:disabled, textarea:disabled {
   border-color: var(--accent);
 }
 
+.grid-wrap {
+  display: contents;
+}
+
+.grid-wrap.hidden,
+.transcript-wrap.hidden {
+  display: none;
+}
+
 .grid-transcripts {
   display: grid;
   gap: 10px;

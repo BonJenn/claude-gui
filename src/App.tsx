@@ -1292,7 +1292,7 @@ function App() {
     <div className="root">
       <Sidebar
         sessions={sessions}
-        activeId={activeSessionId}
+        activeId={gridMode ? undefined : activeSessionId}
         loading={sessionsLoading}
         resumingId={resumingId}
         onResume={(id, cwd) => {
@@ -1429,7 +1429,7 @@ function App() {
           </div>
         </header>
 
-        {gridMode ? (
+        <div className={`grid-wrap ${gridMode ? "" : "hidden"}`}>
           <LiveGrid
             panels={gridPanels}
             sessions={sessions}
@@ -1452,38 +1452,37 @@ function App() {
               });
             }}
           />
-        ) : (
-          <section className="transcript-wrap">
-            {entries.length === 0 ? (
-              <div className="empty">
-                {resumingId ? (
-                  <p>loading session…</p>
-                ) : (
-                  <>
-                    <p>Type a message below to start a new session, or pick a past one from the sidebar.</p>
-                    <p className="hint">Settings apply to the next session you start.</p>
-                  </>
-                )}
-              </div>
-            ) : (
-              <PlainTranscript
-                entries={entries}
-                busy={busy}
-                scrollRef={transcriptScrollRef}
-                onAtBottomChange={handleAtBottomChange}
-              />
-            )}
-            {!stuckToBottom && entries.length > 0 && (
-              <button
-                className={`jump-bottom ${hasNewBelow ? "pulse" : ""}`}
-                onClick={scrollToBottom}
-                title="jump to bottom"
-              >
-                ↓
-              </button>
-            )}
-          </section>
-        )}
+        </div>
+        <section className={`transcript-wrap ${gridMode ? "hidden" : ""}`}>
+          {entries.length === 0 ? (
+            <div className="empty">
+              {resumingId ? (
+                <p>loading session…</p>
+              ) : (
+                <>
+                  <p>Type a message below to start a new session, or pick a past one from the sidebar.</p>
+                  <p className="hint">Settings apply to the next session you start.</p>
+                </>
+              )}
+            </div>
+          ) : (
+            <PlainTranscript
+              entries={entries}
+              busy={busy}
+              scrollRef={transcriptScrollRef}
+              onAtBottomChange={handleAtBottomChange}
+            />
+          )}
+          {!stuckToBottom && entries.length > 0 && (
+            <button
+              className={`jump-bottom ${hasNewBelow ? "pulse" : ""}`}
+              onClick={scrollToBottom}
+              title="jump to bottom"
+            >
+              ↓
+            </button>
+          )}
+        </section>
 
         {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
