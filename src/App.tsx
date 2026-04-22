@@ -341,6 +341,18 @@ function App() {
       setSelectedGridPanelId(gridPanels[0]);
     }
   }, [gridMode, gridPanels, selectedGridPanelId]);
+
+  // In grid mode, the topbar mirrors whichever panel is currently selected
+  // so cwd/branch/model/permissions stay in sync with what the user is
+  // looking at. Nothing here touches the main-session subprocess.
+  useEffect(() => {
+    if (!gridMode || !selectedGridPanelId) return;
+    const info = sessions.find((s) => s.id === selectedGridPanelId);
+    if (!info) return;
+    if (info.cwd) setCwd(info.cwd);
+    if (info.model) setModel(info.model);
+    if (info.permission_mode) setPermissionMode(info.permission_mode);
+  }, [gridMode, selectedGridPanelId, sessions]);
   useEffect(() => {
     localStorage.setItem("gridMode", gridMode ? "1" : "0");
   }, [gridMode]);
