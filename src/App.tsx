@@ -311,6 +311,10 @@ function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamingIdRef = useRef<string | null>(null);
   const toolUseMapRef = useRef<Map<string, ToolMeta>>(new Map());
+  // Set to true when we're deliberately stopping the current subprocess to
+  // start another (new / resumed session). The claude-done event checks this
+  // so it doesn't show a stale "session ended" sysline mid-switch.
+  const switchingSessionRef = useRef(false);
 
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
@@ -401,6 +405,13 @@ function App() {
         setStderrLines((s) => [...s, e.payload]);
       }),
       listen("claude-done", () => {
+        // Ignore the done event from a subprocess we just killed to switch
+        // to another session; otherwise the transcript flickers a spurious
+        // "session ended" message.
+        if (switchingSessionRef.current) {
+          refreshSessions();
+          return;
+        }
         setSessionOn(false);
         setBusy(false);
         setEntries((es) => [
@@ -715,7 +726,12 @@ function App() {
 
   async function newSession() {
     if (sessionOn) {
-      await stopSession();
+      switchingSessionRef.current = true;
+      try {
+        await stopSession();
+      } finally {
+        switchingSessionRef.current = false;
+      }
     }
     resetSessionState();
     setTimeout(() => inputRef.current?.focus(), 0);
@@ -748,6 +764,16 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
+    // Restore the original model so the resumed turn keeps the same
+    // capabilities / context window the conversation started with.
+    const info = sessions.find((s) => s.id === sessionId);
+    const sessionModel = info?.model ?? "";
+    if (sessionModel) setModel(sessionModel);
+
+    // Flag the switch so the about-to-die subprocess's claude-done event
+    // doesn't print a stale "session ended".
+    switchingSessionRef.current = true;
+
     // Instant visual feedback — all state flips BEFORE any await so the
     // transcript clears and the sidebar highlight updates in the same frame.
     resetSessionState();
@@ -763,7 +789,7 @@ function App() {
     const startPromise = invoke("start_session", {
       cwd: useCwd,
       permissionMode,
-      model: model || null,
+      model: sessionModel || model || null,
       resumeId: sessionId,
     });
 
@@ -809,6 +835,8 @@ function App() {
         ...es,
         { kind: "system", id: randomId(), text: `failed to start: ${e}` },
       ]);
+    } finally {
+      switchingSessionRef.current = false;
     }
   }
 
