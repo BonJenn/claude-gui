@@ -328,6 +328,24 @@ function App() {
     } catch {}
     return [];
   });
+  // Panels that don't correspond to an existing session yet — they come
+  // from the "+ new panel" button and carry a user-picked cwd until a
+  // session is spawned on first message. Keyed by synthetic panel id.
+  const [newPanelCwds, setNewPanelCwds] = useState<Record<string, string>>(
+    () => {
+      const saved = localStorage.getItem("newPanelCwds");
+      if (!saved) return {};
+      try {
+        const parsed = JSON.parse(saved) as unknown;
+        if (parsed && typeof parsed === "object")
+          return parsed as Record<string, string>;
+      } catch {}
+      return {};
+    },
+  );
+  useEffect(() => {
+    localStorage.setItem("newPanelCwds", JSON.stringify(newPanelCwds));
+  }, [newPanelCwds]);
   const [selectedGridPanelId, setSelectedGridPanelId] = useState<string | null>(
     null,
   );
@@ -958,6 +976,13 @@ function App() {
   }
 
   async function newSession() {
+    // In grid mode "+ new session" opens a directory picker and appends a
+    // fresh empty panel that'll spawn its subprocess in that cwd once the
+    // user sends a first message.
+    if (gridMode) {
+      await addNewGridPanel();
+      return;
+    }
     if (sessionOn) {
       switchingSessionRef.current = true;
       try {
@@ -968,6 +993,26 @@ function App() {
     }
     resetSessionState();
     setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  async function addNewGridPanel() {
+    if (gridPanels.length >= 6) return;
+    let chosen: string | null = null;
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: cwd,
+      });
+      if (typeof selected === "string" && selected) chosen = selected;
+    } catch (e) {
+      console.error("pick dir for new panel failed", e);
+    }
+    const targetCwd = chosen || cwd;
+    const key = `new:${randomId()}:${Date.now()}`;
+    setNewPanelCwds((m) => ({ ...m, [key]: targetCwd }));
+    setGridPanels((prev) => [...prev, key]);
+    setSelectedGridPanelId(key);
   }
 
   async function onSwitchBranch(branch: string) {
@@ -1369,9 +1414,17 @@ function App() {
             defaultModel={model}
             selectedId={selectedGridPanelId}
             onSelect={setSelectedGridPanelId}
-            onRemove={(id) =>
-              setGridPanels((prev) => prev.filter((x) => x !== id))
-            }
+            onAddPanel={addNewGridPanel}
+            newPanelCwds={newPanelCwds}
+            onRemove={(id) => {
+              setGridPanels((prev) => prev.filter((x) => x !== id));
+              setNewPanelCwds((m) => {
+                if (!(id in m)) return m;
+                const next = { ...m };
+                delete next[id];
+                return next;
+              });
+            }}
           />
         ) : (
           <section className="transcript-wrap">
@@ -2841,6 +2894,8 @@ function LiveGrid({
   defaultCwd,
   defaultModel,
   selectedId,
+  newPanelCwds,
+  onAddPanel,
   onSelect,
   onRemove,
 }: {
@@ -2854,11 +2909,13 @@ function LiveGrid({
   defaultCwd: string;
   defaultModel: string;
   selectedId: string | null;
+  newPanelCwds: Record<string, string>;
+  onAddPanel: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
-  const panelCount = Math.max(1, Math.min(6, panels.length));
-  const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
+  const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
+  const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
   return (
     <section
       className="grid-transcripts live"
@@ -2866,14 +2923,21 @@ function LiveGrid({
     >
       {panels.map((id) => {
         const info = sessions.find((s) => s.id === id);
+        const isNewPanel = id in newPanelCwds;
+        const panelCwd = isNewPanel
+          ? newPanelCwds[id]
+          : info?.cwd || defaultCwd;
+        const panelModel = isNewPanel
+          ? defaultModel
+          : info?.model || defaultModel;
         return (
           <LivePanel
             key={id}
             panelId={id}
-            initialSessionId={id}
-            initialCwd={info?.cwd || defaultCwd}
-            initialModel={info?.model || defaultModel}
-            initialTitle={info?.title}
+            initialSessionId={isNewPanel ? undefined : id}
+            initialCwd={panelCwd}
+            initialModel={panelModel}
+            initialTitle={isNewPanel ? "new session" : info?.title}
             permissionMode={info?.permission_mode || permissionMode}
             repo=""
             sessionCache={sessionCache}
@@ -2883,6 +2947,17 @@ function LiveGrid({
           />
         );
       })}
+      {panels.length < 6 && (
+        <button
+          type="button"
+          className="grid-add-tile"
+          onClick={onAddPanel}
+          title="add panel"
+        >
+          <span className="grid-add-plus">+</span>
+          <span className="grid-add-label">new panel</span>
+        </button>
+      )}
     </section>
   );
 }
