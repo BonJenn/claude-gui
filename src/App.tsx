@@ -850,6 +850,7 @@ function App() {
     setEntries([]);
     setStderrLines([]);
     toolUseMapRef.current.clear();
+    toolUseMapGlobal.current = toolUseMapRef.current;
     streamingIdRef.current = null;
     setBusy(false);
     setSessionMeta(null);
@@ -936,6 +937,7 @@ function App() {
 
     if (cacheHit) {
       toolUseMapRef.current = new Map(cached!.toolUseMap);
+      toolUseMapGlobal.current = toolUseMapRef.current;
       const t1 = performance.now();
       setEntries([
         ...cached!.entries,
@@ -960,6 +962,7 @@ function App() {
       });
     } else {
       toolUseMapRef.current = new Map();
+      toolUseMapGlobal.current = toolUseMapRef.current;
       setEntries([]);
       setResumingId(sessionId);
     }
@@ -1004,6 +1007,7 @@ function App() {
           mtime_ms: mtime,
         });
         toolUseMapRef.current = new Map(toolUseMap);
+        toolUseMapGlobal.current = toolUseMapRef.current;
         setEntries([
           ...history,
           { kind: "system", id: randomId(), text: "— resumed —" },
@@ -1245,7 +1249,7 @@ function App() {
               computeItemKey={(_, entry) => entry.id}
               itemContent={(_, entry) => (
                 <div className="transcript-row">
-                  <EntryView entry={entry} toolUseMap={toolUseMapRef.current} />
+                  <EntryView entry={entry} />
                 </div>
               )}
               followOutput={stuckToBottom ? "auto" : false}
@@ -1997,9 +2001,16 @@ function renderSessionItem(
   );
 }
 
-type EntryViewProps = { entry: Entry; toolUseMap: Map<string, ToolMeta> };
+// Module-level mirror of App's toolUseMapRef so memoized EntryViews don't
+// have to receive (and compare) the Map as a prop. ToolResultView reads
+// from this directly when it needs to look up the tool name/input.
+const toolUseMapGlobal: { current: Map<string, ToolMeta> } = {
+  current: new Map(),
+};
 
-const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
+type EntryViewProps = { entry: Entry };
+
+const EntryView = memo(({ entry }: EntryViewProps) => {
   if (entry.kind === "user") {
     return (
       <div className="msg msg-user">
@@ -2027,7 +2038,7 @@ const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
   }
 
   if (entry.kind === "tool_result") {
-    const meta = toolUseMap.get(entry.toolUseId);
+    const meta = toolUseMapGlobal.current.get(entry.toolUseId);
     return (
       <ToolResultView
         toolName={meta?.name}
