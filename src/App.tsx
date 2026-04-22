@@ -4,6 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { Webview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -264,6 +267,19 @@ function App() {
   const [previewKey, setPreviewKey] = useState(0);
   const seenUrlsRef = useRef<Set<string>>(new Set());
 
+  useEffect(() => {
+    linkClickHandlerRef.current = (url: string) => {
+      // All links open in the preview panel. If a site blocks iframing (most
+      // production sites do via X-Frame-Options), the panel shows a fallback
+      // prompt to open it in the system browser.
+      setPreviewUrl(normalizeLocalUrl(url));
+      setPreviewOpen(true);
+    };
+    return () => {
+      linkClickHandlerRef.current = null;
+    };
+  }, []);
+
   const autoDetectUrl = useCallback((text: string) => {
     const urls = extractLocalUrls(text);
     if (!urls.length) return;
@@ -287,6 +303,9 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  const sidebarResize = useResizable(260, 200, 520, "right", "sidebarWidth");
+  const previewResize = useResizable(480, 320, 900, "left", "previewWidth");
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -688,6 +707,10 @@ function App() {
     setActiveSessionId(undefined);
     setStuckToBottom(true);
     setHasNewBelow(false);
+    // Preview is per-session — close it and forget detected URLs.
+    setPreviewOpen(false);
+    setPreviewUrl("");
+    seenUrlsRef.current.clear();
   }
 
   async function newSession() {
@@ -864,6 +887,8 @@ function App() {
         onProjectFilterChange={setProjectFilter}
         search={sessionSearch}
         onSearchChange={setSessionSearch}
+        width={sidebarResize.width}
+        onResizeStart={sidebarResize.onPointerDown}
       />
       <main className="app">
         <header className="topbar">
@@ -1070,13 +1095,21 @@ function App() {
         )}
       </main>
       {previewOpen && (
-        <PreviewPanel
-          url={previewUrl}
-          onUrlChange={setPreviewUrl}
-          onClose={() => setPreviewOpen(false)}
-          reloadKey={previewKey}
-          onReload={() => setPreviewKey((k) => k + 1)}
-        />
+        <>
+          <div
+            className="preview-resizer"
+            onPointerDown={previewResize.onPointerDown}
+            title="drag to resize"
+          />
+          <PreviewPanel
+            url={previewUrl}
+            onUrlChange={setPreviewUrl}
+            onClose={() => setPreviewOpen(false)}
+            reloadKey={previewKey}
+            onReload={() => setPreviewKey((k) => k + 1)}
+            width={previewResize.width}
+          />
+        </>
       )}
     </div>
   );
@@ -1088,12 +1121,14 @@ function PreviewPanel({
   onClose,
   reloadKey,
   onReload,
+  width,
 }: {
   url: string;
   onUrlChange: (v: string) => void;
   onClose: () => void;
   reloadKey: number;
   onReload: () => void;
+  width: number;
 }) {
   const [draft, setDraft] = useState(url);
 
@@ -1109,7 +1144,7 @@ function PreviewPanel({
   const canPreview = /^https?:\/\//i.test(url);
 
   return (
-    <aside className="preview">
+    <aside className="preview" style={{ width }}>
       <div className="preview-head">
         <input
           value={draft}
@@ -1137,7 +1172,9 @@ function PreviewPanel({
         <button
           type="button"
           className="icon-btn"
-          onClick={() => url && openUrl(url).catch(() => {})}
+          onClick={() =>
+            url && openUrl(url).catch((err) => console.error("openUrl failed:", err))
+          }
           title="open in browser"
           disabled={!canPreview}
         >
@@ -1154,12 +1191,7 @@ function PreviewPanel({
       </div>
       <div className="preview-body">
         {canPreview ? (
-          <iframe
-            key={`${url}-${reloadKey}`}
-            src={url}
-            className="preview-frame"
-            title="preview"
-          />
+          <NativePreview url={url} reloadKey={reloadKey} />
         ) : (
           <div className="preview-empty">
             enter a URL above or wait for Claude to start a local server
@@ -1168,6 +1200,169 @@ function PreviewPanel({
       </div>
     </aside>
   );
+}
+
+// Embeds a native Tauri webview over the preview panel area. Bypasses
+// X-Frame-Options since it's a real top-level webview, not an iframe.
+function NativePreview({ url, reloadKey }: { url: string; reloadKey: number }) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const webviewRef = useRef<Webview | null>(null);
+  const labelRef = useRef<string>("");
+  const mountedUrlRef = useRef<string>("");
+  const scheduleRef = useRef<(() => void) | null>(null);
+  const topInsetRef = useRef<number>(0);
+
+  // Query Tauri once for the native-chrome top inset (title bar on macOS
+  // windowed mode). JS `window.outerHeight - window.innerHeight` reports 0
+  // inside Tauri because the webview IS the whole content area.
+  useEffect(() => {
+    invoke<number>("window_top_inset")
+      .then((v) => {
+        topInsetRef.current = v;
+        scheduleRef.current?.();
+      })
+      .catch(() => {});
+  }, []);
+
+  // Mount / unmount: create the webview, tear it down on cleanup.
+  useEffect(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    let cancelled = false;
+    let wv: Webview | null = null;
+
+    (async () => {
+      const parent = getCurrentWindow();
+      // Use the Tauri-reported inset so the initial bounds are right too.
+      let inset = topInsetRef.current;
+      if (inset === 0) {
+        inset = await invoke<number>("window_top_inset").catch(() => 0);
+        topInsetRef.current = inset;
+      }
+      const rect = el.getBoundingClientRect();
+      const label = `preview-${Math.random().toString(36).slice(2, 10)}`;
+      labelRef.current = label;
+      wv = new Webview(parent, label, {
+        url,
+        x: Math.round(rect.x),
+        y: Math.round(rect.y + inset),
+        width: Math.max(10, Math.round(rect.width)),
+        height: Math.max(10, Math.round(rect.height)),
+      });
+      if (cancelled) {
+        wv.close().catch(() => {});
+        return;
+      }
+      webviewRef.current = wv;
+      mountedUrlRef.current = url;
+      // Kick the sync once the webview is actually attached so it lands in
+      // the right spot even if the resize observer hasn't fired.
+      scheduleRef.current?.();
+    })();
+
+    return () => {
+      cancelled = true;
+      const w = webviewRef.current;
+      webviewRef.current = null;
+      if (w) w.close().catch(() => {});
+      else if (wv) wv.close().catch(() => {});
+    };
+    // Only mount once; URL changes are handled by a separate effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the native webview's position and size in sync with the DOM anchor.
+  useEffect(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+
+    let raf = 0;
+    const sync = () => {
+      raf = 0;
+      const wv = webviewRef.current;
+      if (!wv) return;
+      const r = el.getBoundingClientRect();
+      const inset = topInsetRef.current;
+      wv.setPosition(
+        new LogicalPosition(Math.round(r.x), Math.round(r.y + inset)),
+      ).catch((err) => console.error("setPosition failed:", err));
+      wv.setSize(
+        new LogicalSize(
+          Math.max(10, Math.round(r.width)),
+          Math.max(10, Math.round(r.height)),
+        ),
+      ).catch((err) => console.error("setSize failed:", err));
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(sync);
+    };
+    // Expose schedule for the mount effect to call once the webview is ready.
+    scheduleRef.current = schedule;
+
+    const ro = new ResizeObserver(schedule);
+    ro.observe(el);
+    // On macOS, full-screen transitions remove the title bar, so the inset
+    // changes. Re-query it whenever the window size changes.
+    const delayedResync = () => {
+      invoke<number>("window_top_inset")
+        .then((v) => {
+          topInsetRef.current = v;
+          schedule();
+        })
+        .catch(() => schedule());
+      setTimeout(schedule, 100);
+      setTimeout(schedule, 400);
+    };
+    window.addEventListener("resize", delayedResync);
+    document.addEventListener("fullscreenchange", delayedResync);
+    window.addEventListener("focus", schedule);
+
+    // During drag resize the native webview would eat pointer events; we
+    // hide it while body[data-resizing="true"] is set and restore it when
+    // the drag ends.
+    const mo = new MutationObserver(() => {
+      const wv = webviewRef.current;
+      if (!wv) return;
+      if (document.body.dataset.resizing === "true") {
+        wv.hide().catch(() => {});
+      } else {
+        wv.show().catch(() => {});
+        schedule();
+      }
+    });
+    mo.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-resizing"],
+    });
+
+    // Initial pass in case the webview mounted a frame ago.
+    schedule();
+
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      window.removeEventListener("resize", delayedResync);
+      document.removeEventListener("fullscreenchange", delayedResync);
+      window.removeEventListener("focus", schedule);
+      scheduleRef.current = null;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  // URL change (or reload) → navigate via a Rust command, since the JS Webview
+  // API doesn't expose navigation directly.
+  useEffect(() => {
+    const label = labelRef.current;
+    if (!label || !url) return;
+    if (url === mountedUrlRef.current && reloadKey === 0) return;
+    mountedUrlRef.current = url;
+    invoke("preview_navigate", { label, url }).catch((err) => {
+      console.error("preview_navigate failed:", err);
+    });
+  }, [url, reloadKey]);
+
+  return <div ref={anchorRef} className="preview-frame-anchor" />;
 }
 
 // ---------------- Sidebar ----------------
@@ -1188,6 +1383,67 @@ function basename(p: string): string {
   if (!p) return "";
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+function useResizable(
+  initial: number,
+  min: number,
+  max: number,
+  direction: "right" | "left",
+  storageKey: string,
+) {
+  const [width, setWidth] = useState<number>(() => {
+    const saved = localStorage.getItem(storageKey);
+    const n = saved ? parseInt(saved, 10) : NaN;
+    if (Number.isFinite(n)) return Math.max(min, Math.min(max, n));
+    return initial;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(storageKey, String(width));
+  }, [width, storageKey]);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = width;
+      const sign = direction === "right" ? 1 : -1;
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      // Flag the body so the native preview webview (which sits above the DOM
+      // and would otherwise swallow pointer events) hides itself for the
+      // duration of the drag.
+      document.body.dataset.resizing = "true";
+      // Full-window overlay so iframes (which otherwise capture pointer
+      // events) can't hijack the drag once the cursor is over them.
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;z-index:99999;cursor:col-resize;";
+      document.body.appendChild(overlay);
+
+      const move = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const next = Math.max(min, Math.min(max, startW + sign * dx));
+        setWidth(next);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        delete document.body.dataset.resizing;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    },
+    [width, min, max, direction],
+  );
+
+  return { width, onPointerDown };
 }
 
 const LOCAL_URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/[^\s)"'`]*)?/gi;
@@ -1227,6 +1483,8 @@ function Sidebar({
   onProjectFilterChange,
   search,
   onSearchChange,
+  width,
+  onResizeStart,
 }: {
   sessions: SessionInfo[];
   activeId?: string;
@@ -1239,6 +1497,8 @@ function Sidebar({
   onProjectFilterChange: (value: string) => void;
   search: string;
   onSearchChange: (value: string) => void;
+  width: number;
+  onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
@@ -1270,7 +1530,12 @@ function Sidebar({
   }, [sessions, projectFilter, search]);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" style={{ width }}>
+      <div
+        className="sidebar-resizer"
+        onPointerDown={onResizeStart}
+        title="drag to resize"
+      />
       <div className="sidebar-head">
         <div className="sidebar-title">sessions</div>
         <button className="icon-btn" onClick={onRefresh} title="refresh">
@@ -1432,6 +1697,39 @@ const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
   return null;
 });
 
+// Module-level handler set by App so markdown links can open in the side
+// preview panel without us re-creating mdComponents on every render.
+const linkClickHandlerRef: { current: ((url: string) => void) | null } = {
+  current: null,
+};
+
+const mdComponents = {
+  a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    const isExternal = !!href && /^https?:\/\//i.test(href);
+    return (
+      <a
+        href={href}
+        {...rest}
+        target={isExternal ? "_blank" : undefined}
+        rel={isExternal ? "noopener noreferrer" : undefined}
+        onClick={(e) => {
+          if (!href || !isExternal) return;
+          // Always prevent default so the app window never navigates.
+          e.preventDefault();
+          e.stopPropagation();
+          if (linkClickHandlerRef.current) {
+            linkClickHandlerRef.current(href);
+          } else {
+            openUrl(href).catch((err) => console.error("openUrl failed:", err));
+          }
+        }}
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
 function BlockView({ block }: { block: Block }) {
   if (block.type === "text") {
     const tb = block as TextBlock;
@@ -1446,6 +1744,7 @@ function BlockView({ block }: { block: Block }) {
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeHighlight]}
+          components={mdComponents}
         >
           {text}
         </ReactMarkdown>
@@ -1463,7 +1762,12 @@ function BlockView({ block }: { block: Block }) {
           <pre className="thinking-stream">{t}</pre>
         ) : (
           <div className="markdown">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{t}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={mdComponents}
+            >
+              {t}
+            </ReactMarkdown>
           </div>
         )}
       </details>

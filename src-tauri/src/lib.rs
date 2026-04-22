@@ -163,6 +163,48 @@ fn default_cwd() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
 }
 
+#[tauri::command]
+fn preview_navigate(app: tauri::AppHandle, label: String, url: String) -> Result<(), String> {
+    use tauri::Manager;
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|e: url::ParseError| format!("invalid url: {}", e))?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("webview '{}' not found", label))?;
+    webview.navigate(parsed).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns the top inset of the main window's content area in logical pixels
+/// (title bar height on macOS, 0 on fullscreen / frameless windows).
+#[tauri::command]
+fn window_top_inset(window: tauri::Window) -> Result<u32, String> {
+    if window.is_fullscreen().unwrap_or(false) {
+        return Ok(0);
+    }
+    let outer_size = window.outer_size().map_err(|e| e.to_string())?;
+    let inner_size = window.inner_size().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let diff_physical = (outer_size.height as i32) - (inner_size.height as i32);
+    let logical = if diff_physical > 0 {
+        ((diff_physical as f64) / scale).round() as u32
+    } else {
+        // Tauri sometimes reports the same size for outer and inner on macOS
+        // once the webview is attached. Fall back to the standard title bar
+        // height so the child webview lands below the URL bar anyway.
+        #[cfg(target_os = "macos")]
+        {
+            28
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0
+        }
+    };
+    Ok(logical)
+}
+
 #[derive(serde::Serialize)]
 struct BranchInfo {
     is_repo: bool,
@@ -494,7 +536,9 @@ pub fn run() {
             list_sessions,
             load_session,
             list_branches,
-            switch_branch
+            switch_branch,
+            preview_navigate,
+            window_top_inset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

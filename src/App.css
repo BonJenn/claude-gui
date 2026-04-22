@@ -136,18 +136,50 @@ body {
   display: grid;
   grid-template-rows: auto 1fr auto auto;
   max-height: 100vh;
+  overflow: hidden;
+}
+
+.topbar {
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* ---------- sidebar ---------- */
 
 .sidebar {
-  width: 260px;
   flex-shrink: 0;
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -6px;
+  width: 12px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:active::after {
+  background: var(--accent);
 }
 
 .sidebar-head {
@@ -574,12 +606,19 @@ input:disabled, select:disabled, textarea:disabled {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .transcript {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   padding: 16px 20px 4px;
+}
+
+.transcript [data-virtuoso-scroller="true"],
+.transcript-row {
+  min-width: 0;
 }
 
 .transcript-row {
@@ -1481,14 +1520,36 @@ details.block[open] > summary::before,
 /* ---------- preview panel ---------- */
 
 .preview {
-  width: 480px;
-  min-width: 320px;
   flex-shrink: 0;
-  border-left: 1px solid var(--border);
   background: var(--bg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.preview-resizer {
+  flex-shrink: 0;
+  width: 12px;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+  z-index: 10;
+}
+
+.preview-resizer::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--border);
+  transition: background 0.12s;
+}
+
+.preview-resizer:hover::after,
+.preview-resizer:active::after {
+  background: var(--accent);
 }
 
 .preview-head {
@@ -1530,6 +1591,12 @@ details.block[open] > summary::before,
   height: 100%;
   border: none;
   background: #ffffff;
+}
+
+.preview-frame-anchor {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-elev);
 }
 
 .preview-empty {
