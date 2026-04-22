@@ -324,6 +324,8 @@ body {
 
 .session-item {
   position: relative;
+  appearance: none;
+  -webkit-appearance: none;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -331,6 +333,7 @@ body {
   cursor: pointer;
   text-align: left;
   color: var(--text);
+  font: inherit;
   font-family: var(--sans);
   transition: background 0.12s, border-color 0.12s, color 0.12s,
     transform 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
@@ -408,6 +411,14 @@ body {
   }
 }
 
+.session-item,
+.session-item .session-title,
+.session-item .session-project,
+.session-item .session-bar,
+.session-item .session-meta {
+  color: var(--text);
+}
+
 .session-title {
   font-size: 12.5px;
   line-height: 1.35;
@@ -415,9 +426,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
-}
-
-.session-item.active .session-title {
   color: var(--text);
 }
 
