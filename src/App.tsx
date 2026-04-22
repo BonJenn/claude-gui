@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
@@ -359,7 +358,7 @@ function App() {
   const sidebarResize = useResizable(260, 200, 520, "right", "sidebarWidth");
   const previewResize = useResizable(480, 320, 900, "left", "previewWidth");
 
-  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamingIdRef = useRef<string | null>(null);
   const toolUseMapRef = useRef<Map<string, ToolMeta>>(new Map());
@@ -404,11 +403,8 @@ function App() {
   useEffect(() => {
     if (busy) {
       requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({
-          index: "LAST",
-          align: "end",
-          behavior: "smooth",
-        });
+        const el = transcriptScrollRef.current;
+        if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       });
     }
   }, [busy]);
@@ -508,7 +504,8 @@ function App() {
   }, []);
 
   function scrollToBottom() {
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "smooth" });
+    const el = transcriptScrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     setStuckToBottom(true);
     setHasNewBelow(false);
   }
@@ -945,11 +942,8 @@ function App() {
       ]);
       setResumingId(null);
       requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({
-          index: "LAST",
-          align: "end",
-          behavior: "auto",
-        });
+        const el = transcriptScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
         requestAnimationFrame(() => {
           const dt = performance.now() - t0;
           const dtSince = performance.now() - t1;
@@ -1013,11 +1007,8 @@ function App() {
           { kind: "system", id: randomId(), text: "— resumed —" },
         ]);
         requestAnimationFrame(() => {
-          virtuosoRef.current?.scrollToIndex({
-            index: "LAST",
-            align: "end",
-            behavior: "auto",
-          });
+          const el = transcriptScrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
         });
       } catch (e) {
         if (isLatest()) {
@@ -1242,24 +1233,11 @@ function App() {
               )}
             </div>
           ) : (
-            <Virtuoso
-              ref={virtuosoRef}
-              className="transcript"
-              data={entries}
-              computeItemKey={(_, entry) => entry.id}
-              itemContent={(_, entry) => (
-                <div className="transcript-row">
-                  <EntryView entry={entry} />
-                </div>
-              )}
-              followOutput={stuckToBottom ? "auto" : false}
-              atBottomStateChange={handleAtBottomChange}
-              atBottomThreshold={48}
-              initialTopMostItemIndex={Math.max(0, entries.length - 1)}
-              increaseViewportBy={200}
-              components={{
-                Footer: busy ? TypingIndicator : undefined,
-              }}
+            <PlainTranscript
+              entries={entries}
+              busy={busy}
+              scrollRef={transcriptScrollRef}
+              onAtBottomChange={handleAtBottomChange}
             />
           )}
           {!stuckToBottom && entries.length > 0 && (
@@ -2641,6 +2619,44 @@ function StreamingText({ text }: { text: string }) {
       {lines.map((line, i) => (
         <p key={i}>{line || "\u00A0"}</p>
       ))}
+    </div>
+  );
+}
+
+// Plain scrollable transcript — no virtualization, just DOM. For <= ~300
+// entries with precompiled HTML per message, this is dramatically faster
+// than Virtuoso's measurement pass on every session switch.
+function PlainTranscript({
+  entries,
+  busy,
+  scrollRef,
+  onAtBottomChange,
+}: {
+  entries: Entry[];
+  busy: boolean;
+  scrollRef: React.RefObject<HTMLDivElement>;
+  onAtBottomChange: (atBottom: boolean) => void;
+}) {
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+      onAtBottomChange(distance < 48);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [onAtBottomChange, scrollRef]);
+
+  return (
+    <div className="transcript plain" ref={scrollRef}>
+      {entries.map((entry) => (
+        <div key={entry.id} className="transcript-row">
+          <EntryView entry={entry} />
+        </div>
+      ))}
+      {busy && <TypingIndicator />}
     </div>
   );
 }
