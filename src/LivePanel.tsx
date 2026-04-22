@@ -33,6 +33,7 @@ export function LivePanel({
   isActive,
   onFocus,
   onRemove,
+  onSessionStarted,
 }: {
   panelId: string;
   initialSessionId?: string;
@@ -48,6 +49,7 @@ export function LivePanel({
   isActive: boolean;
   onFocus: () => void;
   onRemove: () => void;
+  onSessionStarted?: (sessionId: string) => void;
 }) {
   const [entries, setEntries] = useState<Entry[]>(() => {
     if (initialSessionId) {
@@ -83,7 +85,15 @@ export function LivePanel({
   const handleEvent = useCallback(
     (ev: StreamEvent) => {
       if (ev.type === "system" && ev.subtype === "init") {
-        if (ev.session_id) setSessionId(ev.session_id);
+        if (ev.session_id) {
+          setSessionId((prev) => {
+            // Notify the host exactly once per panel when the subprocess
+            // first reports its session id — used to refresh the sidebar
+            // so a brand-new session appears at the top immediately.
+            if (!prev && onSessionStarted) onSessionStarted(ev.session_id!);
+            return ev.session_id;
+          });
+        }
         return;
       }
 

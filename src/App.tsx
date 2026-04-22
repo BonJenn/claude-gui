@@ -1441,6 +1441,7 @@ function App() {
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
             newPanelCwds={newPanelCwds}
+            onSessionStarted={() => refreshSessions()}
             onRemove={(id) => {
               setGridPanels((prev) => prev.filter((x) => x !== id));
               setNewPanelCwds((m) => {
@@ -2923,6 +2924,7 @@ function LiveGrid({
   onAddPanel,
   onSelect,
   onRemove,
+  onSessionStarted,
 }: {
   panels: string[];
   sessions: SessionInfo[];
@@ -2938,6 +2940,7 @@ function LiveGrid({
   onAddPanel: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
+  onSessionStarted: (sessionId: string) => void;
 }) {
   const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
@@ -2969,6 +2972,7 @@ function LiveGrid({
             isActive={selectedId === id}
             onFocus={() => onSelect(id)}
             onRemove={() => onRemove(id)}
+            onSessionStarted={onSessionStarted}
           />
         );
       })}
