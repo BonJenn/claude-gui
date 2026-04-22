@@ -868,6 +868,7 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
+    const t0 = performance.now();
     const token = ++resumeTokenRef.current;
     const isLatest = () => resumeTokenRef.current === token;
     userInteractedRef.current = true;
@@ -912,6 +913,9 @@ function App() {
           align: "end",
           behavior: "auto",
         });
+        const dt = performance.now() - t0;
+        // eslint-disable-next-line no-console
+        console.log(`[resume:cache-hit] ${sessionId.slice(0, 8)} ${dt.toFixed(1)}ms to first paint`);
       });
     } else {
       toolUseMapRef.current = new Map();
@@ -1686,21 +1690,13 @@ function Sidebar({
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // Scroll the active session to the very top of the sidebar list.
+  // The active session is reordered to the top of the filtered list, so
+  // snapping the sidebar to scrollTop: 0 puts it in view immediately.
   useEffect(() => {
     if (!activeId) return;
-    const id = activeId;
-    // Defer one frame so the ref for a newly rendered active item is set.
-    const raf = requestAnimationFrame(() => {
-      const el = itemRefs.current.get(id);
-      const list = listRef.current;
-      if (!el || !list) return;
-      const listRect = list.getBoundingClientRect();
-      const elRect = el.getBoundingClientRect();
-      const target = list.scrollTop + (elRect.top - listRect.top);
-      list.scrollTo({ top: Math.max(0, target), behavior: "auto" });
-    });
-    return () => cancelAnimationFrame(raf);
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTo({ top: 0, behavior: "auto" });
   }, [activeId]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
@@ -1720,7 +1716,7 @@ function Sidebar({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return sessions.filter((s) => {
+    const matches = sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
       return (
@@ -1729,7 +1725,16 @@ function Sidebar({
         s.id.toLowerCase().includes(q)
       );
     });
-  }, [sessions, projectFilter, search]);
+    // Move the active session to the top of the list so the clicked
+    // conversation is immediately visible at the top.
+    if (activeId) {
+      const active = matches.find((s) => s.id === activeId);
+      if (active && matches[0]?.id !== activeId) {
+        return [active, ...matches.filter((s) => s.id !== activeId)];
+      }
+    }
+    return matches;
+  }, [sessions, projectFilter, search, activeId]);
 
   return (
     <aside className="sidebar" style={{ width }}>
