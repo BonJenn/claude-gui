@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { compileMarkdown } from "./markdown";
+import { LivePanel } from "./LivePanel";
 import "./App.css";
 
 // Hoisted so they're stable across renders — creating them fresh each time
@@ -17,31 +18,31 @@ import "./App.css";
 const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS = [rehypeHighlight];
 
-type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
-type ToolUseBlock = {
+export type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
+export type ToolUseBlock = {
   type: "tool_use";
   id: string;
   name: string;
   input: unknown;
   _inputJson?: string;
 };
-type ToolResultBlock = {
+export type ToolResultBlock = {
   type: "tool_result";
   tool_use_id: string;
   content: string | Array<{ type: string; text?: string }>;
   is_error?: boolean;
 };
-type ThinkingBlock = {
+export type ThinkingBlock = {
   type: "thinking";
   thinking: string;
   _streaming?: boolean;
   _html?: string;
 };
-type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
+export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
-type ToolMeta = { name: string; input: unknown };
+export type ToolMeta = { name: string; input: unknown };
 
-type Entry =
+export type Entry =
   | { kind: "user"; id: string; text: string }
   | { kind: "assistant"; id: string; blocks: Block[] }
   | {
@@ -54,7 +55,7 @@ type Entry =
   | { kind: "system"; id: string; text: string }
   | { kind: "result"; id: string; text: string; isError?: boolean };
 
-type StreamEvent =
+export type StreamEvent =
   | {
       type: "system";
       subtype: string;
@@ -88,7 +89,7 @@ type StreamEvent =
       session_id?: string;
     };
 
-type PartialEvent =
+export type PartialEvent =
   | { type: "message_start"; message: { id: string } }
   | { type: "content_block_start"; index: number; content_block: Block }
   | {
@@ -125,7 +126,7 @@ type BranchInfo = {
   dirty: boolean;
 };
 
-const REPLAY_SKIP = new Set([
+export const REPLAY_SKIP = new Set([
   "queue-operation",
   "last-prompt",
   "ai-title",
@@ -139,7 +140,7 @@ const REPLAY_SKIP = new Set([
 // rendering is essentially free on click.
 const SESSION_TAIL_LIMIT = 200;
 
-function randomId() {
+export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
@@ -160,7 +161,7 @@ async function getGithubRepo(cwd: string): Promise<string> {
   }
 }
 
-function buildHistory(
+export function buildHistory(
   events: Array<Record<string, unknown>>,
   repo?: string,
 ): {
@@ -1316,12 +1317,13 @@ function App() {
         </header>
 
         {gridMode ? (
-          <GridTranscripts
+          <LiveGrid
             panels={gridPanels}
             sessions={sessions}
-            cache={sessionCacheRef.current}
-            activeId={activeSessionId}
-            onActivate={(id, cwd) => resumeSession(id, cwd)}
+            sessionCache={sessionCacheRef.current}
+            permissionMode={permissionMode}
+            defaultCwd={cwd}
+            defaultModel={model}
             onRemove={(id) =>
               setGridPanels((prev) => prev.filter((x) => x !== id))
             }
@@ -2115,15 +2117,35 @@ function renderSessionItem(
 }
 
 // Module-level mirror of App's toolUseMapRef so memoized EntryViews don't
-// have to receive (and compare) the Map as a prop. ToolResultView reads
-// from this directly when it needs to look up the tool name/input.
+// have to receive (and compare) the Map as a prop. Keyed by panel so each
+// LivePanel in grid mode can have its own tool registry.
+const panelToolUseMaps = new Map<string, Map<string, ToolMeta>>();
+// Back-compat shim for the main single-panel path.
 const toolUseMapGlobal: { current: Map<string, ToolMeta> } = {
-  current: new Map(),
+  current: (() => {
+    const m = new Map<string, ToolMeta>();
+    panelToolUseMaps.set("main", m);
+    return m;
+  })(),
 };
 
-type EntryViewProps = { entry: Entry };
+export function toolUseMapForPanel(
+  panelId: string,
+): Map<string, ToolMeta> | undefined {
+  return panelToolUseMaps.get(panelId);
+}
 
-const EntryView = memo(({ entry }: EntryViewProps) => {
+export function setToolUseMapForPanel(
+  panelId: string,
+  map: Map<string, ToolMeta> | null,
+): void {
+  if (map) panelToolUseMaps.set(panelId, map);
+  else panelToolUseMaps.delete(panelId);
+}
+
+type EntryViewProps = { entry: Entry; panelId?: string };
+
+export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
   if (entry.kind === "user") {
     return (
       <div className="msg msg-user">
@@ -2151,7 +2173,9 @@ const EntryView = memo(({ entry }: EntryViewProps) => {
   }
 
   if (entry.kind === "tool_result") {
-    const meta = toolUseMapGlobal.current.get(entry.toolUseId);
+    const map =
+      panelToolUseMaps.get(panelId) ?? toolUseMapGlobal.current;
+    const meta = map.get(entry.toolUseId);
     return (
       <ToolResultView
         toolName={meta?.name}
@@ -2761,6 +2785,65 @@ function StreamingText({ text }: { text: string }) {
 // Plain scrollable transcript — no virtualization, just DOM. For <= ~300
 // entries with precompiled HTML per message, this is dramatically faster
 // than Virtuoso's measurement pass on every session switch.
+// Grid of up to 6 LIVE session panels, each with its own claude subprocess.
+function LiveGrid({
+  panels,
+  sessions,
+  sessionCache,
+  permissionMode,
+  defaultCwd,
+  defaultModel,
+  onRemove,
+}: {
+  panels: string[];
+  sessions: SessionInfo[];
+  sessionCache: Map<
+    string,
+    { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+  >;
+  permissionMode: string;
+  defaultCwd: string;
+  defaultModel: string;
+  onRemove: (id: string) => void;
+}) {
+  const [focused, setFocused] = useState<string | null>(panels[0] ?? null);
+  useEffect(() => {
+    if (panels.length === 0) {
+      setFocused(null);
+    } else if (!focused || !panels.includes(focused)) {
+      setFocused(panels[0]);
+    }
+  }, [panels, focused]);
+  const panelCount = Math.max(1, Math.min(6, panels.length));
+  const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
+  return (
+    <section
+      className="grid-transcripts live"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {panels.map((id) => {
+        const info = sessions.find((s) => s.id === id);
+        return (
+          <LivePanel
+            key={id}
+            panelId={id}
+            initialSessionId={id}
+            initialCwd={info?.cwd || defaultCwd}
+            initialModel={info?.model || defaultModel}
+            initialTitle={info?.title}
+            permissionMode={permissionMode}
+            repo=""
+            sessionCache={sessionCache}
+            isActive={focused === id}
+            onFocus={() => setFocused(id)}
+            onRemove={() => onRemove(id)}
+          />
+        );
+      })}
+    </section>
+  );
+}
+
 // Grid overview of up to 6 cached session transcripts. Each panel shows a
 // lightweight preview (last ~40 entries from cache) plus a click-to-activate
 // button so the user can quickly bring one to the front.
@@ -2883,7 +2966,7 @@ function PlainTranscript({
   );
 }
 
-function TypingIndicator() {
+export function TypingIndicator() {
   return (
     <div className="typing">
       <span /><span /><span />
