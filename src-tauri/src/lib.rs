@@ -163,6 +163,36 @@ fn default_cwd() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
 }
 
+/// Returns the "owner/repo" slug for the git repo at `cwd`, or an empty
+/// string if it isn't a GitHub remote. Used to linkify PR references in
+/// chat markdown.
+#[tauri::command]
+fn git_remote_url(cwd: String) -> String {
+    use std::process::Command;
+    let output = match Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(&cwd)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Some(ssh) = url.strip_prefix("git@github.com:") {
+        return ssh.trim_end_matches(".git").to_string();
+    }
+    if let Some(https) = url.strip_prefix("https://github.com/") {
+        return https.trim_end_matches(".git").to_string();
+    }
+    if let Some(https) = url.strip_prefix("git://github.com/") {
+        return https.trim_end_matches(".git").to_string();
+    }
+    String::new()
+}
+
 #[tauri::command]
 fn preview_navigate(app: tauri::AppHandle, label: String, url: String) -> Result<(), String> {
     use tauri::Manager;
@@ -604,7 +634,8 @@ pub fn run() {
             switch_branch,
             preview_navigate,
             window_top_inset,
-            load_session_tail
+            load_session_tail,
+            git_remote_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

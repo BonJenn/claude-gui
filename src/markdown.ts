@@ -91,18 +91,72 @@ function isSafeUrl(href: string): boolean {
 
 const mdCache = new Map<string, string>();
 
-export function compileMarkdown(text: string): string {
+export function compileMarkdown(text: string, repo?: string): string {
   if (!text) return "";
-  const hit = mdCache.get(text);
+  const key = repo ? `${repo}\x00${text}` : text;
+  const hit = mdCache.get(key);
   if (hit) return hit;
   try {
-    const html = marked.parse(text, { async: false }) as string;
-    // Bounded cache so we don't leak memory on repeat sessions.
+    let html = marked.parse(text, { async: false }) as string;
+    if (repo) html = linkifyPrRefs(html, repo);
     if (mdCache.size > 5000) mdCache.clear();
-    mdCache.set(text, html);
+    mdCache.set(key, html);
     return html;
   } catch (err) {
     console.error("markdown compile failed", err);
     return `<p>${escapeHtml(text)}</p>`;
   }
+}
+
+const PR_RE = /\b(?:PR|pr|pull(?:\s+request)?)\s*#?(\d+)\b/g;
+
+// Walk the parsed HTML body, replace "PR #123" / "PR#123" / "pull request 123"
+// references in text nodes with real anchors. Skips code, pre, and existing
+// anchors so we never mangle syntax highlighting or double-link something.
+function linkifyPrRefs(html: string, repo: string): string {
+  const doc = new DOMParser().parseFromString(
+    `<div id="r">${html}</div>`,
+    "text/html",
+  );
+  const root = doc.getElementById("r");
+  if (!root) return html;
+
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let cur = walker.nextNode();
+  while (cur) {
+    const parent = (cur as Text).parentElement;
+    if (parent && !parent.closest("a, code, pre")) {
+      textNodes.push(cur as Text);
+    }
+    cur = walker.nextNode();
+  }
+
+  for (const node of textNodes) {
+    const text = node.data;
+    PR_RE.lastIndex = 0;
+    if (!PR_RE.test(text)) continue;
+    PR_RE.lastIndex = 0;
+    const frag = doc.createDocumentFragment();
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = PR_RE.exec(text))) {
+      const [match, num] = m;
+      const offset = m.index;
+      if (offset > last) {
+        frag.appendChild(doc.createTextNode(text.slice(last, offset)));
+      }
+      const a = doc.createElement("a");
+      a.setAttribute("href", `https://github.com/${repo}/pull/${num}`);
+      a.textContent = match;
+      frag.appendChild(a);
+      last = offset + match.length;
+    }
+    if (last < text.length) {
+      frag.appendChild(doc.createTextNode(text.slice(last)));
+    }
+    node.parentNode?.replaceChild(frag, node);
+  }
+
+  return root.innerHTML;
 }
