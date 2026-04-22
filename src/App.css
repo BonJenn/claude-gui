@@ -341,6 +341,7 @@ body {
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  flex-shrink: 0;
   overflow: hidden;
 }
 
