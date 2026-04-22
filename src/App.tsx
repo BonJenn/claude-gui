@@ -1137,6 +1137,11 @@ function App() {
             </div>
           ) : (
             <Virtuoso
+              // Keying on the session id remounts Virtuoso for each session
+              // switch, which lets it skip measurement deltas and show the
+              // new transcript synchronously at the bottom via
+              // initialTopMostItemIndex.
+              key={activeSessionId ?? "new"}
               ref={virtuosoRef}
               className="transcript"
               data={entries}
@@ -1149,7 +1154,7 @@ function App() {
               followOutput={stuckToBottom ? "auto" : false}
               atBottomStateChange={handleAtBottomChange}
               atBottomThreshold={48}
-              initialTopMostItemIndex={entries.length - 1}
+              initialTopMostItemIndex={Math.max(0, entries.length - 1)}
               increaseViewportBy={400}
               components={{
                 Footer: busy ? TypingIndicator : undefined,
@@ -1636,6 +1641,23 @@ function Sidebar({
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // Scroll the active session into view at the top of the sidebar list.
+  useEffect(() => {
+    if (!activeId) return;
+    const el = itemRefs.current.get(activeId);
+    const list = listRef.current;
+    if (!el || !list) return;
+    const elTop = el.offsetTop;
+    const listScrollTop = list.scrollTop;
+    const elBottom = elTop + el.offsetHeight;
+    const listBottom = listScrollTop + list.clientHeight;
+    if (elTop < listScrollTop || elBottom > listBottom) {
+      list.scrollTo({ top: Math.max(0, elTop - 8), behavior: "smooth" });
+    }
+  }, [activeId]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
   const projects = useMemo(() => {
@@ -1715,7 +1737,7 @@ function Sidebar({
           ))}
         </select>
       </div>
-      <div className="sessions-list">
+      <div className="sessions-list" ref={listRef}>
         {loading && filtered.length === 0 && (
           <div className="sessions-empty">loading…</div>
         )}
@@ -1737,6 +1759,10 @@ function Sidebar({
               key={s.id}
               role="button"
               tabIndex={0}
+              ref={(el) => {
+                if (el) itemRefs.current.set(s.id, el);
+                else itemRefs.current.delete(s.id);
+              }}
               className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
               onClick={() => onResume(s.id, s.cwd)}
               onKeyDown={(e) => {
