@@ -305,6 +305,12 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>();
   const [projectFilter, setProjectFilter] = useState<string>("");
   const [sessionSearch, setSessionSearch] = useState<string>("");
+  const [groupByProject, setGroupByProject] = useState<boolean>(() => {
+    return localStorage.getItem("sidebar.groupByProject") === "1";
+  });
+  useEffect(() => {
+    localStorage.setItem("sidebar.groupByProject", groupByProject ? "1" : "0");
+  }, [groupByProject]);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [branchInfo, setBranchInfo] = useState<BranchInfo | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
@@ -1098,6 +1104,8 @@ function App() {
         onProjectFilterChange={setProjectFilter}
         search={sessionSearch}
         onSearchChange={setSessionSearch}
+        grouped={groupByProject}
+        onGroupedChange={setGroupByProject}
         width={sidebarResize.width}
         onResizeStart={sidebarResize.onPointerDown}
       />
@@ -1701,6 +1709,8 @@ function Sidebar({
   onProjectFilterChange,
   search,
   onSearchChange,
+  grouped,
+  onGroupedChange,
   width,
   onResizeStart,
 }: {
@@ -1716,6 +1726,8 @@ function Sidebar({
   onProjectFilterChange: (value: string) => void;
   search: string;
   onSearchChange: (value: string) => void;
+  grouped: boolean;
+  onGroupedChange: (value: boolean) => void;
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
@@ -1757,16 +1769,45 @@ function Sidebar({
         s.id.toLowerCase().includes(q)
       );
     });
-    // Move the active session to the top of the list so the clicked
-    // conversation is immediately visible at the top.
-    if (activeId) {
+    // Only float the active to the top in flat mode — in grouped mode it
+    // belongs under its project header.
+    if (!grouped && activeId) {
       const active = matches.find((s) => s.id === activeId);
       if (active && matches[0]?.id !== activeId) {
         return [active, ...matches.filter((s) => s.id !== activeId)];
       }
     }
     return matches;
-  }, [sessions, projectFilter, search, activeId]);
+  }, [sessions, projectFilter, search, activeId, grouped]);
+
+  // Group filtered sessions by project basename when the toggle is on.
+  const groupList = useMemo(() => {
+    if (!grouped) return null;
+    const byProject = new Map<
+      string,
+      { cwd: string; name: string; sessions: SessionInfo[] }
+    >();
+    for (const s of filtered) {
+      const key = s.cwd || "unknown";
+      const bucket = byProject.get(key);
+      if (bucket) {
+        bucket.sessions.push(s);
+      } else {
+        byProject.set(key, {
+          cwd: s.cwd,
+          name: basename(s.cwd) || key,
+          sessions: [s],
+        });
+      }
+    }
+    return Array.from(byProject.entries())
+      .map(([key, v]) => ({
+        key,
+        ...v,
+        latest: v.sessions.reduce((m, s) => Math.max(m, s.mtime_ms), 0),
+      }))
+      .sort((a, b) => b.latest - a.latest);
+  }, [filtered, grouped]);
 
   return (
     <aside className="sidebar" style={{ width }}>
@@ -1817,6 +1858,15 @@ function Sidebar({
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          className={`icon-btn sidebar-group-toggle ${grouped ? "active" : ""}`}
+          onClick={() => onGroupedChange(!grouped)}
+          title={grouped ? "flat list" : "group by project"}
+          aria-pressed={grouped}
+        >
+          {grouped ? "☰" : "⫶"}
+        </button>
       </div>
       <div className="sessions-list" ref={listRef}>
         {loading && filtered.length === 0 && (
@@ -1828,70 +1878,111 @@ function Sidebar({
         {!loading && filtered.length === 0 && sessions.length > 0 && (
           <div className="sessions-empty">no sessions match the filter</div>
         )}
-        {filtered.map((s) => {
-          const ctxRatio =
-            s.context_limit > 0 ? Math.min(1, s.context_tokens / s.context_limit) : 0;
-          const costBudget = 5;
-          const costRatio = Math.min(1, s.total_cost_usd / costBudget);
-          const isActive = activeId === s.id;
-          const isLoading = resumingId === s.id;
-          return (
-            <div
-              key={s.id}
-              role="button"
-              tabIndex={0}
-              ref={(el) => {
-                if (el) itemRefs.current.set(s.id, el);
-                else itemRefs.current.delete(s.id);
-              }}
-              className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
-              onClick={() => onResume(s.id, s.cwd)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onResume(s.id, s.cwd);
-                }
-              }}
-              title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
-            >
-              {isLoading && <span className="session-loading-bar" />}
-              <span className="session-title">{s.title || "(untitled)"}</span>
-              <span className="session-project">{basename(s.cwd) || "unknown"}</span>
-              <div className="session-bar">
-                <span className="session-bar-label">ctx</span>
-                <div className="session-bar-track">
-                  <div
-                    className="session-bar-fill"
-                    style={{
-                      width: `${(ctxRatio * 100).toFixed(1)}%`,
-                      background: barColor(ctxRatio),
-                    }}
-                  />
+        {groupList
+          ? groupList.map((g) => (
+              <section key={g.key} className="session-group">
+                <header className="session-group-head" title={g.cwd}>
+                  <span className="session-group-name">{g.name}</span>
+                  <span className="session-group-count">{g.sessions.length}</span>
+                </header>
+                <div className="session-group-body">
+                  {g.sessions.map((s) =>
+                    renderSessionItem(s, {
+                      activeId,
+                      resumingId,
+                      onResume,
+                      itemRefs,
+                      grouped: true,
+                    }),
+                  )}
                 </div>
-                <span className="session-bar-value">{formatTokens(s.context_tokens)}</span>
-              </div>
-              <div className="session-bar">
-                <span className="session-bar-label">$</span>
-                <div className="session-bar-track">
-                  <div
-                    className="session-bar-fill"
-                    style={{
-                      width: `${(costRatio * 100).toFixed(1)}%`,
-                      background: barColor(costRatio),
-                    }}
-                  />
-                </div>
-                <span className="session-bar-value">${s.total_cost_usd.toFixed(2)}</span>
-              </div>
-              <div className="session-meta">
-                <span>{relativeTime(s.mtime_ms)}</span>
-                <span className="session-count">{s.message_count} msg</span>
-              </div>
-            </div>
-          );
-        })}
+              </section>
+            ))
+          : filtered.map((s) =>
+              renderSessionItem(s, {
+                activeId,
+                resumingId,
+                onResume,
+                itemRefs,
+                grouped: false,
+              }),
+            )}
       </div>
     </aside>
+  );
+}
+
+function renderSessionItem(
+  s: SessionInfo,
+  ctx: {
+    activeId?: string;
+    resumingId: string | null;
+    onResume: (id: string, cwd: string) => void;
+    itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
+    grouped: boolean;
+  },
+) {
+  const ctxRatio =
+    s.context_limit > 0 ? Math.min(1, s.context_tokens / s.context_limit) : 0;
+  const costBudget = 5;
+  const costRatio = Math.min(1, s.total_cost_usd / costBudget);
+  const isActive = ctx.activeId === s.id;
+  const isLoading = ctx.resumingId === s.id;
+  return (
+    <div
+      key={s.id}
+      role="button"
+      tabIndex={0}
+      ref={(el) => {
+        if (el) ctx.itemRefs.current.set(s.id, el);
+        else ctx.itemRefs.current.delete(s.id);
+      }}
+      className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
+      onClick={() => ctx.onResume(s.id, s.cwd)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          ctx.onResume(s.id, s.cwd);
+        }
+      }}
+      title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
+    >
+      {isLoading && <span className="session-loading-bar" />}
+      <span className="session-title">{s.title || "(untitled)"}</span>
+      {!ctx.grouped && (
+        <span className="session-project">{basename(s.cwd) || "unknown"}</span>
+      )}
+      <div className="session-bar">
+        <span className="session-bar-label">ctx</span>
+        <div className="session-bar-track">
+          <div
+            className="session-bar-fill"
+            style={{
+              width: `${(ctxRatio * 100).toFixed(1)}%`,
+              background: barColor(ctxRatio),
+            }}
+          />
+        </div>
+        <span className="session-bar-value">{formatTokens(s.context_tokens)}</span>
+      </div>
+      <div className="session-bar">
+        <span className="session-bar-label">$</span>
+        <div className="session-bar-track">
+          <div
+            className="session-bar-fill"
+            style={{
+              width: `${(costRatio * 100).toFixed(1)}%`,
+              background: barColor(costRatio),
+            }}
+          />
+        </div>
+        <span className="session-bar-value">${s.total_cost_usd.toFixed(2)}</span>
+      </div>
+      <div className="session-meta">
+        <span>{relativeTime(s.mtime_ms)}</span>
+        <span className="session-count">{s.message_count} msg</span>
+      </div>
+    </div>
   );
 }
 
