@@ -332,6 +332,9 @@ function App() {
   // Tracks which resume attempt is latest so an older slow load doesn't
   // clobber a newer one if the user clicks quickly.
   const resumeTokenRef = useRef(0);
+  // Set once the user actually clicks a session. Prewarm watches this to
+  // yield IPC bandwidth for the user-initiated load.
+  const userInteractedRef = useRef(false);
 
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
@@ -398,16 +401,17 @@ function App() {
   }, [cwd, refreshBranches]);
 
   // Pre-warm every session's cache using the cheap tail endpoint so the
-  // first click on ANY session is as instant as the second. Tail reads are
-  // small and parse fast, so prewarming all 170+ sessions is practical.
+  // first click on ANY session is as instant as the second. Paused the
+  // moment the user clicks a session so their click doesn't queue behind
+  // bulk prewarm IPCs.
   useEffect(() => {
     if (sessions.length === 0) return;
     let cancelled = false;
     const queue = sessions.slice();
-    const concurrency = 6;
+    const concurrency = 2;
 
     const prewarmOne = async (s: SessionInfo) => {
-      if (cancelled) return;
+      if (cancelled || userInteractedRef.current) return;
       const existing = sessionCacheRef.current.get(s.id);
       if (existing && existing.mtime_ms === s.mtime_ms) return;
       try {
@@ -415,7 +419,7 @@ function App() {
           "load_session_tail",
           { sessionId: s.id, cwd: s.cwd, limit: SESSION_TAIL_LIMIT },
         );
-        if (cancelled) return;
+        if (cancelled || userInteractedRef.current) return;
         const { entries, toolUseMap } = buildHistory(events);
         sessionCacheRef.current.set(s.id, {
           entries,
@@ -429,7 +433,7 @@ function App() {
 
     const idx = { i: 0 };
     const worker = async () => {
-      while (!cancelled) {
+      while (!cancelled && !userInteractedRef.current) {
         const i = idx.i++;
         if (i >= queue.length) return;
         await prewarmOne(queue[i]);
@@ -830,6 +834,7 @@ function App() {
   async function resumeSession(sessionId: string, sessionCwd: string) {
     const token = ++resumeTokenRef.current;
     const isLatest = () => resumeTokenRef.current === token;
+    userInteractedRef.current = true;
 
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
@@ -1642,9 +1647,18 @@ function Sidebar({
   // Scroll the active session to the very top of the sidebar list.
   useEffect(() => {
     if (!activeId) return;
-    const el = itemRefs.current.get(activeId);
-    if (!el) return;
-    el.scrollIntoView({ behavior: "auto", block: "start" });
+    const id = activeId;
+    // Defer one frame so the ref for a newly rendered active item is set.
+    const raf = requestAnimationFrame(() => {
+      const el = itemRefs.current.get(id);
+      const list = listRef.current;
+      if (!el || !list) return;
+      const listRect = list.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const target = list.scrollTop + (elRect.top - listRect.top);
+      list.scrollTo({ top: Math.max(0, target), behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(raf);
   }, [activeId]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
