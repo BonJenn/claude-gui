@@ -936,6 +936,7 @@ function App() {
 
     if (cacheHit) {
       toolUseMapRef.current = new Map(cached!.toolUseMap);
+      const t1 = performance.now();
       setEntries([
         ...cached!.entries,
         { kind: "system", id: randomId(), text: "— resumed —" },
@@ -947,9 +948,15 @@ function App() {
           align: "end",
           behavior: "auto",
         });
-        const dt = performance.now() - t0;
-        // eslint-disable-next-line no-console
-        console.log(`[resume:cache-hit] ${sessionId.slice(0, 8)} ${dt.toFixed(1)}ms to first paint`);
+        requestAnimationFrame(() => {
+          const dt = performance.now() - t0;
+          const dtSince = performance.now() - t1;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[resume:cache-hit] id=${sessionId.slice(0, 8)} entries=${cached!.entries.length} ` +
+              `total=${dt.toFixed(1)}ms paintAfterSetEntries=${dtSince.toFixed(1)}ms`,
+          );
+        });
       });
     } else {
       toolUseMapRef.current = new Map();
@@ -969,6 +976,7 @@ function App() {
 
     if (!cacheHit) {
       try {
+        const tInvoke = performance.now();
         // Fetch only the tail — it's what we need to render immediately and
         // parses/serializes in tens of ms vs hundreds for a full load.
         const [events, repo] = await Promise.all([
@@ -980,7 +988,16 @@ function App() {
           getGithubRepo(useCwd),
         ]);
         if (!isLatest()) return;
+        const tParsed = performance.now();
         const { entries: history, toolUseMap } = buildHistory(events, repo);
+        const tBuilt = performance.now();
+        // eslint-disable-next-line no-console
+        console.log(
+          `[resume:cache-miss] id=${sessionId.slice(0, 8)} events=${events.length} ` +
+            `invoke=${(tParsed - tInvoke).toFixed(1)}ms ` +
+            `build=${(tBuilt - tParsed).toFixed(1)}ms ` +
+            `total=${(performance.now() - t0).toFixed(1)}ms`,
+        );
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
@@ -1222,12 +1239,6 @@ function App() {
             </div>
           ) : (
             <Virtuoso
-              // Re-mount per session so the new transcript shows at its
-              // initialTopMostItemIndex synchronously, skipping the diff &
-              // measurement settle when data identity changes. Items render
-              // via precompiled HTML (dangerouslySetInnerHTML), so the
-              // remount cost is trivial — just DOM node creation.
-              key={activeSessionId ?? "new"}
               ref={virtuosoRef}
               className="transcript"
               data={entries}
