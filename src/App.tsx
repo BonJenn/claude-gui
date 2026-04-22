@@ -144,7 +144,27 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function buildHistory(events: Array<Record<string, unknown>>): {
+// Module-level cache keyed by cwd. `undefined` = not yet queried.
+const githubRepoCache = new Map<string, string>();
+
+async function getGithubRepo(cwd: string): Promise<string> {
+  if (!cwd) return "";
+  const cached = githubRepoCache.get(cwd);
+  if (cached !== undefined) return cached;
+  try {
+    const repo = await invoke<string>("git_remote_url", { cwd });
+    githubRepoCache.set(cwd, repo || "");
+    return repo || "";
+  } catch {
+    githubRepoCache.set(cwd, "");
+    return "";
+  }
+}
+
+function buildHistory(
+  events: Array<Record<string, unknown>>,
+  repo?: string,
+): {
   entries: Entry[];
   toolUseMap: Map<string, ToolMeta>;
 } {
@@ -164,11 +184,11 @@ function buildHistory(events: Array<Record<string, unknown>>): {
       const blocks = (msg?.content ?? []).map((b): Block => {
         if (b.type === "text") {
           const tb = b as TextBlock;
-          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+          return { ...tb, _html: compileMarkdown(tb.text ?? "", repo) };
         }
         if (b.type === "thinking") {
           const thb = b as ThinkingBlock;
-          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "", repo) };
         }
         return b;
       });
@@ -419,6 +439,9 @@ function App() {
 
   useEffect(() => {
     refreshBranches(cwd);
+    // Warm the GitHub repo cache for this cwd so streaming content_block_stop
+    // events can linkify PR references synchronously.
+    if (cwd) getGithubRepo(cwd);
   }, [cwd, refreshBranches]);
 
   // Pre-warm every session's cache using the cheap tail endpoint so the
@@ -436,12 +459,16 @@ function App() {
       const existing = sessionCacheRef.current.get(s.id);
       if (existing && existing.mtime_ms === s.mtime_ms) return;
       try {
-        const events = await invoke<Array<Record<string, unknown>>>(
-          "load_session_tail",
-          { sessionId: s.id, cwd: s.cwd, limit: SESSION_TAIL_LIMIT },
-        );
+        const [events, repo] = await Promise.all([
+          invoke<Array<Record<string, unknown>>>("load_session_tail", {
+            sessionId: s.id,
+            cwd: s.cwd,
+            limit: SESSION_TAIL_LIMIT,
+          }),
+          getGithubRepo(s.cwd),
+        ]);
         if (cancelled || userInteractedRef.current) return;
-        const { entries, toolUseMap } = buildHistory(events);
+        const { entries, toolUseMap } = buildHistory(events, repo);
         sessionCacheRef.current.set(s.id, {
           entries,
           toolUseMap,
@@ -552,14 +579,15 @@ function App() {
 
     if (ev.type === "assistant") {
       const msgId = ev.message.id;
+      const repo = githubRepoCache.get(cwd) || "";
       const blocks = ev.message.content.map((b): Block => {
         if (b.type === "text") {
           const tb = b as TextBlock;
-          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+          return { ...tb, _html: compileMarkdown(tb.text ?? "", repo) };
         }
         if (b.type === "thinking") {
           const thb = b as ThinkingBlock;
-          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "", repo) };
         }
         return b;
       });
@@ -770,12 +798,12 @@ function App() {
         if (cleaned.type === "text") {
           const tb = cleaned as TextBlock;
           delete tb._streaming;
-          tb._html = compileMarkdown(tb.text ?? "");
+          tb._html = compileMarkdown(tb.text ?? "", githubRepoCache.get(cwd) || "");
         }
         if (cleaned.type === "thinking") {
           const thb = cleaned as ThinkingBlock;
           delete thb._streaming;
-          thb._html = compileMarkdown(thb.thinking ?? "");
+          thb._html = compileMarkdown(thb.thinking ?? "", githubRepoCache.get(cwd) || "");
         }
         if (cleaned.type === "tool_use") {
           const tu = cleaned as ToolUseBlock;
@@ -937,12 +965,16 @@ function App() {
       try {
         // Fetch only the tail — it's what we need to render immediately and
         // parses/serializes in tens of ms vs hundreds for a full load.
-        const events = await invoke<Array<Record<string, unknown>>>(
-          "load_session_tail",
-          { sessionId, cwd: useCwd, limit: SESSION_TAIL_LIMIT },
-        );
+        const [events, repo] = await Promise.all([
+          invoke<Array<Record<string, unknown>>>("load_session_tail", {
+            sessionId,
+            cwd: useCwd,
+            limit: SESSION_TAIL_LIMIT,
+          }),
+          getGithubRepo(useCwd),
+        ]);
         if (!isLatest()) return;
-        const { entries: history, toolUseMap } = buildHistory(events);
+        const { entries: history, toolUseMap } = buildHistory(events, repo);
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
