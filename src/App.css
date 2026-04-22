@@ -323,6 +323,7 @@ body {
 }
 
 .session-item {
+  position: relative;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -331,11 +332,13 @@ body {
   text-align: left;
   color: var(--text-dim);
   font-family: var(--sans);
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  transition: background 0.12s, border-color 0.12s, color 0.12s,
+    transform 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
   display: flex;
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .session-item:hover {
@@ -344,10 +347,67 @@ body {
   border-color: var(--border);
 }
 
+.session-item:active {
+  transform: scale(0.985);
+}
+
 .session-item.active {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--text);
+  animation: session-activate 0.35s ease-out;
+}
+
+.session-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+@keyframes session-activate {
+  0% {
+    transform: scale(0.96);
+    background: var(--accent);
+  }
+  60% {
+    transform: scale(1.01);
+  }
+  100% {
+    transform: scale(1);
+    background: var(--accent-soft);
+  }
+}
+
+.session-loading-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 50%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-position: -40% 0;
+  animation: session-loading-sweep 1s ease-in-out infinite;
+}
+
+@keyframes session-loading-sweep {
+  0% {
+    background-position: -40% 0;
+  }
+  100% {
+    background-position: 140% 0;
+  }
 }
 
 .session-title {

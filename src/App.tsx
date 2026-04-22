@@ -1011,6 +1011,7 @@ function App() {
         sessions={sessions}
         activeId={activeSessionId}
         loading={sessionsLoading}
+        resumingId={resumingId}
         onResume={resumeSession}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
@@ -1607,6 +1608,7 @@ function Sidebar({
   sessions,
   activeId,
   loading,
+  resumingId,
   onResume,
   onNew,
   onRefresh,
@@ -1621,6 +1623,7 @@ function Sidebar({
   sessions: SessionInfo[];
   activeId?: string;
   loading: boolean;
+  resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
   onNew: () => void;
   onRefresh: () => void;
@@ -1650,7 +1653,7 @@ function Sidebar({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return sessions.filter((s) => {
+    const matches = sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
       return (
@@ -1659,7 +1662,13 @@ function Sidebar({
         s.id.toLowerCase().includes(q)
       );
     });
-  }, [sessions, projectFilter, search]);
+    // Float the active session to the top so clicking it gives an immediate
+    // visible jump even before the transcript finishes loading.
+    if (!activeId) return matches;
+    const activeIdx = matches.findIndex((s) => s.id === activeId);
+    if (activeIdx <= 0) return matches;
+    return [matches[activeIdx], ...matches.filter((_, i) => i !== activeIdx)];
+  }, [sessions, projectFilter, search, activeId]);
 
   return (
     <aside className="sidebar" style={{ width }}>
@@ -1726,13 +1735,16 @@ function Sidebar({
             s.context_limit > 0 ? Math.min(1, s.context_tokens / s.context_limit) : 0;
           const costBudget = 5;
           const costRatio = Math.min(1, s.total_cost_usd / costBudget);
+          const isActive = activeId === s.id;
+          const isLoading = resumingId === s.id;
           return (
             <button
               key={s.id}
-              className={`session-item ${activeId === s.id ? "active" : ""}`}
+              className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
               onClick={() => onResume(s.id, s.cwd)}
               title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
             >
+              {isLoading && <span className="session-loading-bar" />}
               <div className="session-title">{s.title || "(untitled)"}</div>
               <div className="session-project">{basename(s.cwd) || "unknown"}</div>
               <div className="session-bar">
