@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -14,7 +15,9 @@ struct Session {
 
 #[derive(Default)]
 struct AppState {
-    session: Arc<Mutex<Option<Session>>>,
+    // Each panel gets its own claude subprocess, keyed by a frontend-supplied
+    // panel_id. In single-panel mode the frontend uses the literal "main".
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -55,13 +58,14 @@ fn projects_dir() -> Option<PathBuf> {
 async fn start_session(
     app: AppHandle,
     state: State<'_, AppState>,
+    panel_id: String,
     cwd: String,
     permission_mode: Option<String>,
     model: Option<String>,
     resume_id: Option<String>,
 ) -> Result<(), String> {
-    let mut guard = state.session.lock().await;
-    if let Some(mut s) = guard.take() {
+    let mut guard = state.sessions.lock().await;
+    if let Some(mut s) = guard.remove(&panel_id) {
         let _ = s.child.start_kill();
     }
 
@@ -98,30 +102,44 @@ async fn start_session(
     let stderr = child.stderr.take().ok_or_else(|| "no stderr handle".to_string())?;
 
     let app_out = app.clone();
+    let pid_out = panel_id.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app_out.emit("claude-event", line);
+            let _ = app_out.emit(
+                "claude-event",
+                serde_json::json!({ "panel_id": pid_out, "line": line }),
+            );
         }
-        let _ = app_out.emit("claude-done", ());
+        let _ = app_out.emit("claude-done", serde_json::json!({ "panel_id": pid_out }));
     });
 
     let app_err = app.clone();
+    let pid_err = panel_id.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app_err.emit("claude-stderr", line);
+            let _ = app_err.emit(
+                "claude-stderr",
+                serde_json::json!({ "panel_id": pid_err, "line": line }),
+            );
         }
     });
 
-    *guard = Some(Session { child, stdin });
+    guard.insert(panel_id, Session { child, stdin });
     Ok(())
 }
 
 #[tauri::command]
-async fn send_message(state: State<'_, AppState>, text: String) -> Result<(), String> {
-    let mut guard = state.session.lock().await;
-    let session = guard.as_mut().ok_or_else(|| "no active session".to_string())?;
+async fn send_message(
+    state: State<'_, AppState>,
+    panel_id: String,
+    text: String,
+) -> Result<(), String> {
+    let mut guard = state.sessions.lock().await;
+    let session = guard
+        .get_mut(&panel_id)
+        .ok_or_else(|| format!("no active session for panel {}", panel_id))?;
     let msg = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": text }
@@ -137,18 +155,18 @@ async fn send_message(state: State<'_, AppState>, text: String) -> Result<(), St
 }
 
 #[tauri::command]
-async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().await;
-    if let Some(mut s) = guard.take() {
+async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
+    let mut guard = state.sessions.lock().await;
+    if let Some(mut s) = guard.remove(&panel_id) {
         let _ = s.child.start_kill();
     }
     Ok(())
 }
 
 #[tauri::command]
-async fn interrupt_session(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state.session.lock().await;
-    if let Some(s) = guard.as_ref() {
+async fn interrupt_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
+    let guard = state.sessions.lock().await;
+    if let Some(s) = guard.get(&panel_id) {
         if let Some(pid) = s.child.id() {
             unsafe {
                 libc::kill(pid as i32, libc::SIGINT);

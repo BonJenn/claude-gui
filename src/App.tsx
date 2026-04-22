@@ -577,18 +577,24 @@ function App() {
 
   useEffect(() => {
     const pending: Promise<() => void>[] = [
-      listen<string>("claude-event", (e) => {
+      listen<{ panel_id: string; line: string }>("claude-event", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const line = e.payload?.line;
+        if (typeof line !== "string") return;
         try {
-          const ev = JSON.parse(e.payload) as StreamEvent;
+          const ev = JSON.parse(line) as StreamEvent;
           handleEvent(ev);
         } catch (err) {
-          console.error("bad claude-event payload", err, e.payload);
+          console.error("bad claude-event payload", err, line);
         }
       }),
-      listen<string>("claude-stderr", (e) => {
-        setStderrLines((s) => [...s, e.payload]);
+      listen<{ panel_id: string; line: string }>("claude-stderr", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const line = e.payload?.line ?? "";
+        if (line) setStderrLines((s) => [...s, line]);
       }),
-      listen("claude-done", () => {
+      listen<{ panel_id: string }>("claude-done", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
         // Ignore the done event from a subprocess we just killed to switch
         // to another session; otherwise the transcript flickers a spurious
         // "session ended" message.
@@ -1030,6 +1036,7 @@ function App() {
 
     // Kick off the claude subprocess in parallel — it boots while we load.
     const startPromise = invoke("start_session", {
+      panelId: "main",
       cwd: useCwd,
       permissionMode,
       model: sessionModel || model || null,
@@ -1107,7 +1114,7 @@ function App() {
 
   async function stopSession() {
     try {
-      await invoke("stop_session");
+      await invoke("stop_session", { panelId: "main" });
     } finally {
       setSessionOn(false);
       setBusy(false);
@@ -1116,7 +1123,7 @@ function App() {
 
   async function interruptTurn() {
     try {
-      await invoke("interrupt_session");
+      await invoke("interrupt_session", { panelId: "main" });
     } catch (e) {
       console.error("interrupt failed", e);
     }
@@ -1129,6 +1136,7 @@ function App() {
     if (!sessionOn) {
       try {
         await invoke("start_session", {
+          panelId: "main",
           cwd,
           permissionMode,
           model: model || null,
@@ -1164,7 +1172,7 @@ function App() {
     setStuckToBottom(true);
     setHasNewBelow(false);
     try {
-      await invoke("send_message", { text: body });
+      await invoke("send_message", { panelId: "main", text: body });
     } catch (e) {
       setBusy(false);
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
