@@ -393,20 +393,14 @@ function App() {
   }, [cwd, refreshBranches]);
 
   // Pre-warm the cache for recent sessions in the background so the first
-  // click on any of them is instant — not just the second.
+  // click on any of them is instant. Runs up to 4 concurrent loads — Tauri
+  // handles concurrent invokes on its async runtime.
   useEffect(() => {
     if (sessions.length === 0) return;
     let cancelled = false;
-    const idle = (cb: () => void) => {
-      const w = window as typeof window & {
-        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-      };
-      if (typeof w.requestIdleCallback === "function") {
-        w.requestIdleCallback(cb, { timeout: 1500 });
-      } else {
-        setTimeout(cb, 100);
-      }
-    };
+    const queue = sessions.slice(0, 40);
+    const concurrency = 4;
+
     const prewarmOne = async (s: SessionInfo) => {
       if (cancelled) return;
       const existing = sessionCacheRef.current.get(s.id);
@@ -427,21 +421,21 @@ function App() {
         // ignore — a missing/unreadable session just means no prewarm for it
       }
     };
-    const queue = sessions.slice(0, 20);
-    const run = () => {
-      idle(async () => {
-        for (const s of queue) {
-          if (cancelled) return;
-          await prewarmOne(s);
-          await new Promise<void>((r) => idle(() => r()));
-        }
-      });
+
+    const idx = { i: 0 };
+    const worker = async () => {
+      while (!cancelled) {
+        const i = idx.i++;
+        if (i >= queue.length) return;
+        await prewarmOne(queue[i]);
+      }
     };
-    // Defer so initial render isn't competing with prewarm IPC.
-    const t = setTimeout(run, 250);
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < concurrency; w++) workers.push(worker());
+    Promise.all(workers).catch(() => {});
+
     return () => {
       cancelled = true;
-      clearTimeout(t);
     };
   }, [sessions]);
 
@@ -1653,7 +1647,7 @@ function Sidebar({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const matches = sessions.filter((s) => {
+    let matches = sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
       return (
@@ -1663,11 +1657,14 @@ function Sidebar({
       );
     });
     // Float the active session to the top so clicking it gives an immediate
-    // visible jump even before the transcript finishes loading.
-    if (!activeId) return matches;
-    const activeIdx = matches.findIndex((s) => s.id === activeId);
-    if (activeIdx <= 0) return matches;
-    return [matches[activeIdx], ...matches.filter((_, i) => i !== activeIdx)];
+    // visible jump, but only when it's actually in the filtered set.
+    if (activeId) {
+      const active = matches.find((s) => s.id === activeId);
+      if (active && matches[0]?.id !== activeId) {
+        matches = [active, ...matches.filter((s) => s.id !== activeId)];
+      }
+    }
+    return matches;
   }, [sessions, projectFilter, search, activeId]);
 
   return (

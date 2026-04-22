@@ -353,33 +353,32 @@ body {
 
 .session-item.active {
   background: var(--accent-soft);
-  border-color: var(--accent);
+  border-color: var(--border);
   color: var(--text);
-  animation: session-activate 0.35s ease-out;
+  animation: session-activate 0.28s ease-out;
 }
 
 .session-item.active::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
   background: var(--accent);
   border-radius: 0 2px 2px 0;
+  opacity: 0.75;
 }
 
 @keyframes session-activate {
   0% {
-    transform: scale(0.96);
-    background: var(--accent);
+    transform: scale(0.985);
   }
   60% {
-    transform: scale(1.01);
+    transform: scale(1.005);
   }
   100% {
     transform: scale(1);
-    background: var(--accent-soft);
   }
 }
 
