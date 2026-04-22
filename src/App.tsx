@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Webview } from "@tauri-apps/api/webview";
+import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import ReactMarkdown from "react-markdown";
@@ -294,6 +294,10 @@ function App() {
   } | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<{ id: string; path: string }[]>(
+    [],
+  );
+  const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [showStderr, setShowStderr] = useState(false);
@@ -310,6 +314,38 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sidebar.groupByProject", groupByProject ? "1" : "0");
   }, [groupByProject]);
+
+  // Listen for native drag-drop on the window — this is the reliable way
+  // to get real file paths instead of just File blobs.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (e.payload.type === "enter" || e.payload.type === "over") {
+          setDragOver(true);
+        } else if (e.payload.type === "leave") {
+          setDragOver(false);
+        } else if (e.payload.type === "drop") {
+          setDragOver(false);
+          const paths = (e.payload as { paths?: string[] }).paths ?? [];
+          if (paths.length === 0) return;
+          setAttachments((prev) => {
+            const existing = new Set(prev.map((a) => a.path));
+            const additions = paths
+              .filter((p) => !existing.has(p))
+              .map((p) => ({ id: randomId(), path: p }));
+            return [...prev, ...additions];
+          });
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [branchInfo, setBranchInfo] = useState<BranchInfo | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
@@ -1059,7 +1095,7 @@ function App() {
 
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    if ((!text && attachments.length === 0) || busy) return;
 
     if (!sessionOn) {
       try {
@@ -1079,13 +1115,27 @@ function App() {
       }
     }
 
+    // Attachments become a trailing section of the message so claude's
+    // Read / Bash / Glob tools can pick them up by path.
+    const attachList = attachments
+      .map((a) => `- ${a.path}`)
+      .join("\n");
+    const body =
+      attachments.length > 0
+        ? `${text || "(see attached files)"}\n\n[Attached files]\n${attachList}`
+        : text;
+
     setInput("");
-    setEntries((es) => [...es, { kind: "user", id: randomId(), text }]);
+    setAttachments([]);
+    setEntries((es) => [
+      ...es,
+      { kind: "user", id: randomId(), text: body },
+    ]);
     setBusy(true);
     setStuckToBottom(true);
     setHasNewBelow(false);
     try {
-      await invoke("send_message", { text });
+      await invoke("send_message", { text: body });
     } catch (e) {
       setBusy(false);
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
@@ -1251,28 +1301,55 @@ function App() {
           )}
         </section>
 
-        <footer className="composer">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="message Claude…  (Enter to send, Shift+Enter for newline)"
-            disabled={busy}
-            rows={3}
-          />
-          {busy ? (
-            <button className="btn btn-interrupt" onClick={interruptTurn} title="interrupt turn">
-              interrupt
-            </button>
-          ) : (
-            <button
-              className="btn btn-send"
-              onClick={send}
-              disabled={!input.trim()}
-            >
-              send
-            </button>
+        <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
+          {attachments.length > 0 && (
+            <div className="attachments">
+              {attachments.map((a) => {
+                const name = a.path.split("/").pop() || a.path;
+                return (
+                  <span key={a.id} className="attachment" title={a.path}>
+                    <span className="attachment-name">{name}</span>
+                    <button
+                      type="button"
+                      className="attachment-remove"
+                      onClick={() =>
+                        setAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                      }
+                      aria-label="remove attachment"
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          <div className="composer-row">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="message Claude…  (Enter to send, Shift+Enter for newline; drop files anywhere)"
+              disabled={busy}
+              rows={3}
+            />
+            {busy ? (
+              <button className="btn btn-interrupt" onClick={interruptTurn} title="interrupt turn">
+                interrupt
+              </button>
+            ) : (
+              <button
+                className="btn btn-send"
+                onClick={send}
+                disabled={!input.trim() && attachments.length === 0}
+              >
+                send
+              </button>
+            )}
+          </div>
+          {dragOver && (
+            <div className="drag-hint">drop files to attach</div>
           )}
         </footer>
 
