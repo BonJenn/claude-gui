@@ -314,6 +314,35 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sidebar.groupByProject", groupByProject ? "1" : "0");
   }, [groupByProject]);
+  const [gridMode, setGridMode] = useState<boolean>(() => {
+    return localStorage.getItem("gridMode") === "1";
+  });
+  const [gridPanels, setGridPanels] = useState<string[]>(() => {
+    const saved = localStorage.getItem("gridPanels");
+    if (!saved) return [];
+    try {
+      const parsed = JSON.parse(saved) as unknown;
+      if (Array.isArray(parsed))
+        return parsed.filter((v): v is string => typeof v === "string").slice(0, 6);
+    } catch {}
+    return [];
+  });
+  useEffect(() => {
+    localStorage.setItem("gridMode", gridMode ? "1" : "0");
+  }, [gridMode]);
+  useEffect(() => {
+    localStorage.setItem("gridPanels", JSON.stringify(gridPanels));
+  }, [gridPanels]);
+
+  // When grid mode turns on with no panels yet, seed with the most recent
+  // sessions so the user sees something immediately.
+  useEffect(() => {
+    if (!gridMode) return;
+    if (gridPanels.length > 0) return;
+    if (sessions.length === 0) return;
+    const seed = sessions.slice(0, 6).map((s) => s.id);
+    setGridPanels(seed);
+  }, [gridMode, gridPanels.length, sessions]);
 
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
@@ -1254,6 +1283,14 @@ function App() {
                 <option value="plan">plan</option>
               </select>
             </label>
+            <button
+              type="button"
+              className={`btn btn-secondary grid-mode-toggle ${gridMode ? "active" : ""}`}
+              onClick={() => setGridMode((v) => !v)}
+              title="grid mode (show up to 6 conversations)"
+            >
+              ⊞ grid
+            </button>
             <div className="theme-toggle" role="group" aria-label="theme">
               {(["light", "dark", "jet"] as const).map((t) => (
                 <button
@@ -1270,36 +1307,49 @@ function App() {
           </div>
         </header>
 
-        <section className="transcript-wrap">
-          {entries.length === 0 ? (
-            <div className="empty">
-              {resumingId ? (
-                <p>loading session…</p>
-              ) : (
-                <>
-                  <p>Type a message below to start a new session, or pick a past one from the sidebar.</p>
-                  <p className="hint">Settings apply to the next session you start.</p>
-                </>
-              )}
-            </div>
-          ) : (
-            <PlainTranscript
-              entries={entries}
-              busy={busy}
-              scrollRef={transcriptScrollRef}
-              onAtBottomChange={handleAtBottomChange}
-            />
-          )}
-          {!stuckToBottom && entries.length > 0 && (
-            <button
-              className={`jump-bottom ${hasNewBelow ? "pulse" : ""}`}
-              onClick={scrollToBottom}
-              title="jump to bottom"
-            >
-              ↓
-            </button>
-          )}
-        </section>
+        {gridMode ? (
+          <GridTranscripts
+            panels={gridPanels}
+            sessions={sessions}
+            cache={sessionCacheRef.current}
+            activeId={activeSessionId}
+            onActivate={(id, cwd) => resumeSession(id, cwd)}
+            onRemove={(id) =>
+              setGridPanels((prev) => prev.filter((x) => x !== id))
+            }
+          />
+        ) : (
+          <section className="transcript-wrap">
+            {entries.length === 0 ? (
+              <div className="empty">
+                {resumingId ? (
+                  <p>loading session…</p>
+                ) : (
+                  <>
+                    <p>Type a message below to start a new session, or pick a past one from the sidebar.</p>
+                    <p className="hint">Settings apply to the next session you start.</p>
+                  </>
+                )}
+              </div>
+            ) : (
+              <PlainTranscript
+                entries={entries}
+                busy={busy}
+                scrollRef={transcriptScrollRef}
+                onAtBottomChange={handleAtBottomChange}
+              />
+            )}
+            {!stuckToBottom && entries.length > 0 && (
+              <button
+                className={`jump-bottom ${hasNewBelow ? "pulse" : ""}`}
+                onClick={scrollToBottom}
+                title="jump to bottom"
+              >
+                ↓
+              </button>
+            )}
+          </section>
+        )}
 
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
           {attachments.length > 0 && (
@@ -2703,6 +2753,93 @@ function StreamingText({ text }: { text: string }) {
 // Plain scrollable transcript — no virtualization, just DOM. For <= ~300
 // entries with precompiled HTML per message, this is dramatically faster
 // than Virtuoso's measurement pass on every session switch.
+// Grid overview of up to 6 cached session transcripts. Each panel shows a
+// lightweight preview (last ~40 entries from cache) plus a click-to-activate
+// button so the user can quickly bring one to the front.
+function GridTranscripts({
+  panels,
+  sessions,
+  cache,
+  activeId,
+  onActivate,
+  onRemove,
+}: {
+  panels: string[];
+  sessions: SessionInfo[];
+  cache: Map<
+    string,
+    { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+  >;
+  activeId?: string;
+  onActivate: (id: string, cwd: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const panelCount = Math.max(1, Math.min(6, panels.length));
+  const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
+  return (
+    <section
+      className="grid-transcripts"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {panels.map((id) => {
+        const info = sessions.find((s) => s.id === id);
+        const cached = cache.get(id);
+        const entries = cached?.entries ?? [];
+        const tail = entries.slice(-40);
+        const title = info?.title || "(untitled)";
+        const project = info ? basename(info.cwd) || "unknown" : "";
+        const isActive = activeId === id;
+        return (
+          <div
+            key={id}
+            className={`grid-panel ${isActive ? "active" : ""}`}
+          >
+            <header className="grid-panel-head">
+              <div className="grid-panel-title" title={title}>
+                {title}
+              </div>
+              <div className="grid-panel-meta">
+                <span className="grid-panel-project">{project}</span>
+                <button
+                  type="button"
+                  className="grid-panel-activate"
+                  onClick={() => info && onActivate(info.id, info.cwd)}
+                  disabled={!info || isActive}
+                  title={isActive ? "active" : "open as the active session"}
+                >
+                  {isActive ? "● active" : "open"}
+                </button>
+                <button
+                  type="button"
+                  className="grid-panel-close"
+                  onClick={() => onRemove(id)}
+                  title="remove from grid"
+                  aria-label="remove"
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <div className="grid-panel-body">
+              {!cached ? (
+                <div className="grid-panel-empty">still caching…</div>
+              ) : tail.length === 0 ? (
+                <div className="grid-panel-empty">no messages yet</div>
+              ) : (
+                tail.map((e) => (
+                  <div key={e.id} className="transcript-row">
+                    <EntryView entry={e} />
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 function PlainTranscript({
   entries,
   busy,
