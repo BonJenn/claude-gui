@@ -2,13 +2,14 @@ import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useStat
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "./App.css";
 
-type TextBlock = { type: "text"; text: string };
+type TextBlock = { type: "text"; text: string; _streaming?: boolean };
 type ToolUseBlock = {
   type: "tool_use";
   id: string;
@@ -22,7 +23,7 @@ type ToolResultBlock = {
   content: string | Array<{ type: string; text?: string }>;
   is_error?: boolean;
 };
-type ThinkingBlock = { type: "thinking"; thinking: string };
+type ThinkingBlock = { type: "thinking"; thinking: string; _streaming?: boolean };
 type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
 type ToolMeta = { name: string; input: unknown };
@@ -124,7 +125,7 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function buildHistory(lines: string[]): {
+function buildHistory(events: Array<Record<string, unknown>>): {
   entries: Entry[];
   toolUseMap: Map<string, ToolMeta>;
 } {
@@ -134,14 +135,7 @@ function buildHistory(lines: string[]): {
   // the same message id (retries, continued turns). Keep the latest.
   const msgIdToIdx = new Map<string, number>();
 
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
+  for (const ev of events) {
     const t = (ev.type as string) ?? "";
     if (REPLAY_SKIP.has(t)) continue;
 
@@ -261,9 +255,28 @@ function App() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>();
   const [projectFilter, setProjectFilter] = useState<string>("");
+  const [sessionSearch, setSessionSearch] = useState<string>("");
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [branchInfo, setBranchInfo] = useState<BranchInfo | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewKey, setPreviewKey] = useState(0);
+  const seenUrlsRef = useRef<Set<string>>(new Set());
+
+  const autoDetectUrl = useCallback((text: string) => {
+    const urls = extractLocalUrls(text);
+    if (!urls.length) return;
+    for (const raw of urls) {
+      const u = normalizeLocalUrl(raw);
+      if (!seenUrlsRef.current.has(u)) {
+        seenUrlsRef.current.add(u);
+        setPreviewUrl((prev) => prev || u);
+        setPreviewOpen(true);
+      }
+    }
+  }, []);
+
   const [theme, setTheme] = useState<"light" | "dark" | "jet">(() => {
     const saved = localStorage.getItem("theme");
     if (saved === "light" || saved === "dark" || saved === "jet") return saved;
@@ -295,6 +308,20 @@ function App() {
     }
     lastCountRef.current = entryCount;
   }, [entryCount, stuckToBottom]);
+
+  // When Claude starts thinking, slide to the bottom so the typing
+  // indicator (and the user's just-sent message) stay in view.
+  useEffect(() => {
+    if (busy) {
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({
+          index: "LAST",
+          align: "end",
+          behavior: "smooth",
+        });
+      });
+    }
+  }, [busy]);
 
   const refreshSessions = useCallback(async () => {
     setSessionsLoading(true);
@@ -407,6 +434,11 @@ function App() {
     if (ev.type === "assistant") {
       const msgId = ev.message.id;
       recordToolUses(ev.message.content);
+      for (const b of ev.message.content) {
+        if (b.type === "text") {
+          autoDetectUrl((b as TextBlock).text ?? "");
+        }
+      }
       setEntries((es) => {
         const idx = es.findIndex(
           (x) => x.kind === "assistant" && x.id === msgId,
@@ -447,6 +479,13 @@ function App() {
             if (t) textParts.push(t);
           } else if (b.type === "tool_result") {
             const tr = b as ToolResultBlock;
+            const resultText =
+              typeof tr.content === "string"
+                ? tr.content
+                : tr.content
+                    .map((p) => (p.type === "text" ? p.text ?? "" : ""))
+                    .join(" ");
+            autoDetectUrl(resultText);
             toolResults.push({
               kind: "tool_result",
               id: randomId(),
@@ -474,15 +513,39 @@ function App() {
       streamingIdRef.current = null;
       const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
       const dur = ev.duration_ms != null ? ` • ${(ev.duration_ms / 1000).toFixed(1)}s` : "";
+      const errorDetail =
+        typeof (ev as { error?: unknown }).error === "string"
+          ? ((ev as { error?: string }).error as string)
+          : "";
+      const text =
+        ev.is_error && errorDetail
+          ? `error • ${errorDetail}${cost}${dur}`
+          : `${ev.subtype}${cost}${dur}`;
       setEntries((es) => [
         ...es,
-        {
-          kind: "result",
-          id: randomId(),
-          text: `${ev.subtype}${cost}${dur}`,
-          isError: ev.is_error,
-        },
+        { kind: "result", id: randomId(), text, isError: ev.is_error },
       ]);
+      if (ev.is_error) {
+        setShowStderr(true);
+      }
+      return;
+    }
+
+    // Claude (and the CLI wrapper) can emit top-level error events when the
+    // API call itself fails. Surface them clearly.
+    const evAny = ev as { type?: string; error?: unknown; message?: unknown };
+    if (evAny.type === "error") {
+      setBusy(false);
+      const errObj = evAny.error as { message?: string } | string | undefined;
+      const msg =
+        typeof errObj === "string"
+          ? errObj
+          : errObj?.message ?? (typeof evAny.message === "string" ? evAny.message : "unknown error");
+      setEntries((es) => [
+        ...es,
+        { kind: "system", id: randomId(), text: `API error: ${msg}` },
+      ]);
+      setShowStderr(true);
       return;
     }
   }
@@ -517,11 +580,13 @@ function App() {
       updateBlocks((blocks) => {
         const next = blocks.slice();
         const cb = { ...(ce.content_block as object) } as Block;
-        if ((cb as TextBlock).type === "text" && (cb as TextBlock).text == null) {
-          (cb as TextBlock).text = "";
+        if ((cb as TextBlock).type === "text") {
+          if ((cb as TextBlock).text == null) (cb as TextBlock).text = "";
+          (cb as TextBlock)._streaming = true;
         }
-        if ((cb as ThinkingBlock).type === "thinking" && (cb as ThinkingBlock).thinking == null) {
-          (cb as ThinkingBlock).thinking = "";
+        if ((cb as ThinkingBlock).type === "thinking") {
+          if ((cb as ThinkingBlock).thinking == null) (cb as ThinkingBlock).thinking = "";
+          (cb as ThinkingBlock)._streaming = true;
         }
         if ((cb as ToolUseBlock).type === "tool_use") {
           (cb as ToolUseBlock)._inputJson = "";
@@ -568,8 +633,18 @@ function App() {
       updateBlocks((blocks) => {
         const next = blocks.slice();
         const b = next[se.index] as Block | undefined;
-        if (b && b.type === "tool_use") {
-          const tu = b as ToolUseBlock;
+        if (!b) return blocks;
+        // Create a fresh object to make memoized children re-render to the
+        // finalized (markdown-rendered) view.
+        const cleaned: Block = { ...b } as Block;
+        if (cleaned.type === "text") {
+          delete (cleaned as TextBlock)._streaming;
+        }
+        if (cleaned.type === "thinking") {
+          delete (cleaned as ThinkingBlock)._streaming;
+        }
+        if (cleaned.type === "tool_use") {
+          const tu = cleaned as ToolUseBlock;
           if (tu._inputJson !== undefined) {
             try {
               tu.input = JSON.parse(tu._inputJson || "{}");
@@ -582,6 +657,7 @@ function App() {
             toolUseMapRef.current.set(tu.id, { name: tu.name, input: tu.input });
           }
         }
+        next[se.index] = cleaned;
         return next;
       });
       return;
@@ -669,11 +745,11 @@ function App() {
     });
 
     try {
-      const lines = await invoke<string[]>("load_session", {
+      const events = await invoke<Array<Record<string, unknown>>>("load_session", {
         sessionId,
         cwd: useCwd,
       });
-      const { entries: history, toolUseMap } = buildHistory(lines);
+      const { entries: history, toolUseMap } = buildHistory(events);
       toolUseMapRef.current = toolUseMap;
       // startTransition lets the click feedback + loading indicator paint
       // first, then commits the big history render without blocking input.
@@ -683,6 +759,14 @@ function App() {
           { kind: "system", id: randomId(), text: "— resumed —" },
           ...es,
         ]);
+      });
+      // Start at the bottom — the last exchange is where users want to pick up.
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({
+          index: "LAST",
+          align: "end",
+          behavior: "auto",
+        });
       });
     } catch (e) {
       setEntries((es) => [
@@ -778,6 +862,8 @@ function App() {
         cwd={cwd}
         projectFilter={projectFilter}
         onProjectFilterChange={setProjectFilter}
+        search={sessionSearch}
+        onSearchChange={setSessionSearch}
       />
       <main className="app">
         <header className="topbar">
@@ -901,7 +987,7 @@ function App() {
                   <EntryView entry={entry} toolUseMap={toolUseMapRef.current} />
                 </div>
               )}
-              followOutput={stuckToBottom ? "smooth" : false}
+              followOutput={stuckToBottom ? "auto" : false}
               atBottomStateChange={handleAtBottomChange}
               atBottomThreshold={48}
               initialTopMostItemIndex={entries.length - 1}
@@ -958,6 +1044,15 @@ function App() {
             {sessionMeta?.tools && <span className="meta">• {sessionMeta.tools.length} tools</span>}
           </div>
           <div className="status-right">
+            {!previewOpen && (
+              <button
+                className="stderr-toggle preview-toggle"
+                onClick={() => setPreviewOpen(true)}
+                title={previewUrl || "open preview"}
+              >
+                preview{previewUrl ? " ●" : ""}
+              </button>
+            )}
             {hasStderr && (
               <button className="stderr-toggle" onClick={() => setShowStderr((s) => !s)}>
                 stderr ({stderrLines.length})
@@ -974,7 +1069,104 @@ function App() {
           </div>
         )}
       </main>
+      {previewOpen && (
+        <PreviewPanel
+          url={previewUrl}
+          onUrlChange={setPreviewUrl}
+          onClose={() => setPreviewOpen(false)}
+          reloadKey={previewKey}
+          onReload={() => setPreviewKey((k) => k + 1)}
+        />
+      )}
     </div>
+  );
+}
+
+function PreviewPanel({
+  url,
+  onUrlChange,
+  onClose,
+  reloadKey,
+  onReload,
+}: {
+  url: string;
+  onUrlChange: (v: string) => void;
+  onClose: () => void;
+  reloadKey: number;
+  onReload: () => void;
+}) {
+  const [draft, setDraft] = useState(url);
+
+  useEffect(() => {
+    setDraft(url);
+  }, [url]);
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== url) onUrlChange(trimmed);
+  }
+
+  const canPreview = /^https?:\/\//i.test(url);
+
+  return (
+    <aside className="preview">
+      <div className="preview-head">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            }
+          }}
+          placeholder="http://localhost:3000"
+          spellCheck={false}
+          className="preview-url"
+        />
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onReload}
+          title="reload"
+          disabled={!canPreview}
+        >
+          ⟳
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={() => url && openUrl(url).catch(() => {})}
+          title="open in browser"
+          disabled={!canPreview}
+        >
+          ↗
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onClose}
+          title="close preview"
+        >
+          ×
+        </button>
+      </div>
+      <div className="preview-body">
+        {canPreview ? (
+          <iframe
+            key={`${url}-${reloadKey}`}
+            src={url}
+            className="preview-frame"
+            title="preview"
+          />
+        ) : (
+          <div className="preview-empty">
+            enter a URL above or wait for Claude to start a local server
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -996,6 +1188,19 @@ function basename(p: string): string {
   if (!p) return "";
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+const LOCAL_URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/[^\s)"'`]*)?/gi;
+
+function extractLocalUrls(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(LOCAL_URL_RE);
+  if (!matches) return [];
+  return matches.map((u) => u.replace(/0\.0\.0\.0/g, "localhost"));
+}
+
+function normalizeLocalUrl(url: string): string {
+  return url.replace(/0\.0\.0\.0/g, "localhost");
 }
 
 function formatTokens(n: number): string {
@@ -1020,6 +1225,8 @@ function Sidebar({
   cwd,
   projectFilter,
   onProjectFilterChange,
+  search,
+  onSearchChange,
 }: {
   sessions: SessionInfo[];
   activeId?: string;
@@ -1030,6 +1237,8 @@ function Sidebar({
   cwd: string;
   projectFilter: string;
   onProjectFilterChange: (value: string) => void;
+  search: string;
+  onSearchChange: (value: string) => void;
 }) {
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
@@ -1048,9 +1257,17 @@ function Sidebar({
   }, [sessions]);
 
   const filtered = useMemo(() => {
-    if (!projectFilter) return sessions;
-    return sessions.filter((s) => s.cwd === projectFilter);
-  }, [sessions, projectFilter]);
+    const q = search.trim().toLowerCase();
+    return sessions.filter((s) => {
+      if (projectFilter && s.cwd !== projectFilter) return false;
+      if (!q) return true;
+      return (
+        s.title.toLowerCase().includes(q) ||
+        basename(s.cwd).toLowerCase().includes(q) ||
+        s.id.toLowerCase().includes(q)
+      );
+    });
+  }, [sessions, projectFilter, search]);
 
   return (
     <aside className="sidebar">
@@ -1064,6 +1281,25 @@ function Sidebar({
       <button className="btn btn-new" onClick={onNew}>
         + new session
       </button>
+      <div className="sidebar-search">
+        <input
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="search sessions…"
+          spellCheck={false}
+        />
+        {search && (
+          <button
+            type="button"
+            className="search-clear"
+            onClick={() => onSearchChange("")}
+            title="clear"
+            aria-label="clear search"
+          >
+            ×
+          </button>
+        )}
+      </div>
       <div className="sidebar-filter">
         <select
           value={projectFilter}
@@ -1198,7 +1434,13 @@ const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
 
 function BlockView({ block }: { block: Block }) {
   if (block.type === "text") {
-    const text = (block as TextBlock).text ?? "";
+    const tb = block as TextBlock;
+    const text = tb.text ?? "";
+    // During streaming, skip the markdown parse on every delta — we render
+    // plain-text paragraphs and swap to markdown once the block finalizes.
+    if (tb._streaming) {
+      return <StreamingText text={text} />;
+    }
     return (
       <div className="block text markdown">
         <ReactMarkdown
@@ -1212,13 +1454,18 @@ function BlockView({ block }: { block: Block }) {
   }
 
   if (block.type === "thinking") {
-    const t = (block as ThinkingBlock).thinking ?? "";
+    const tb = block as ThinkingBlock;
+    const t = tb.thinking ?? "";
     return (
       <details className="block thinking" open>
         <summary>thinking</summary>
-        <div className="markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{t}</ReactMarkdown>
-        </div>
+        {tb._streaming ? (
+          <pre className="thinking-stream">{t}</pre>
+        ) : (
+          <div className="markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{t}</ReactMarkdown>
+          </div>
+        )}
       </details>
     );
   }
@@ -1668,6 +1915,18 @@ function ToolResultView({
       ) : (
         <pre className={bodyClass}>{text}</pre>
       )}
+    </div>
+  );
+}
+
+function StreamingText({ text }: { text: string }) {
+  // Split once on newlines — cheap vs. a full markdown parse per delta.
+  const lines = useMemo(() => text.split("\n"), [text]);
+  return (
+    <div className="block text streaming-text">
+      {lines.map((line, i) => (
+        <p key={i}>{line || "\u00A0"}</p>
+      ))}
     </div>
   );
 }

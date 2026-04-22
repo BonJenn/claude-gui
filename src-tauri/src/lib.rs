@@ -434,7 +434,7 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
 }
 
 #[tauri::command]
-fn load_session(session_id: String, cwd: String) -> Result<Vec<String>, String> {
+fn load_session(session_id: String, cwd: String) -> Result<Vec<serde_json::Value>, String> {
     let encoded = encode_cwd(&cwd);
     let path = projects_dir()
         .ok_or_else(|| "no HOME".to_string())?
@@ -443,8 +443,40 @@ fn load_session(session_id: String, cwd: String) -> Result<Vec<String>, String> 
     if !path.exists() {
         return Err("session file not found".to_string());
     }
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    Ok(content.lines().map(|s| s.to_string()).collect())
+    // Skip internal types on the Rust side — avoids shipping noise over IPC
+    // and saves JS a re-parse of every line.
+    let skip: [&str; 6] = [
+        "queue-operation",
+        "last-prompt",
+        "ai-title",
+        "custom-title",
+        "attachment",
+        "system",
+    ];
+    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(file);
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
+            if skip.contains(&t) {
+                continue;
+            }
+        }
+        out.push(v);
+    }
+    Ok(out)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
