@@ -1647,7 +1647,7 @@ function Sidebar({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    let matches = sessions.filter((s) => {
+    return sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
       return (
@@ -1656,16 +1656,7 @@ function Sidebar({
         s.id.toLowerCase().includes(q)
       );
     });
-    // Float the active session to the top so clicking it gives an immediate
-    // visible jump, but only when it's actually in the filtered set.
-    if (activeId) {
-      const active = matches.find((s) => s.id === activeId);
-      if (active && matches[0]?.id !== activeId) {
-        matches = [active, ...matches.filter((s) => s.id !== activeId)];
-      }
-    }
-    return matches;
-  }, [sessions, projectFilter, search, activeId]);
+  }, [sessions, projectFilter, search]);
 
   return (
     <aside className="sidebar" style={{ width }}>
