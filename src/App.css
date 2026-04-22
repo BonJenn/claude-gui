@@ -766,6 +766,11 @@ input:disabled, select:disabled, textarea:disabled {
   padding: 16px 20px 4px;
 }
 
+.transcript.plain {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .transcript [data-virtuoso-scroller="true"],
 .transcript-row {
   min-width: 0;

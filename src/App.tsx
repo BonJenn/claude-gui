@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
@@ -359,7 +358,7 @@ function App() {
   const sidebarResize = useResizable(260, 200, 520, "right", "sidebarWidth");
   const previewResize = useResizable(480, 320, 900, "left", "previewWidth");
 
-  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamingIdRef = useRef<string | null>(null);
   const toolUseMapRef = useRef<Map<string, ToolMeta>>(new Map());
@@ -404,11 +403,8 @@ function App() {
   useEffect(() => {
     if (busy) {
       requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({
-          index: "LAST",
-          align: "end",
-          behavior: "smooth",
-        });
+        const el = transcriptScrollRef.current;
+        if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       });
     }
   }, [busy]);
@@ -508,7 +504,8 @@ function App() {
   }, []);
 
   function scrollToBottom() {
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "smooth" });
+    const el = transcriptScrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     setStuckToBottom(true);
     setHasNewBelow(false);
   }
@@ -850,6 +847,7 @@ function App() {
     setEntries([]);
     setStderrLines([]);
     toolUseMapRef.current.clear();
+    toolUseMapGlobal.current = toolUseMapRef.current;
     streamingIdRef.current = null;
     setBusy(false);
     setSessionMeta(null);
@@ -936,23 +934,29 @@ function App() {
 
     if (cacheHit) {
       toolUseMapRef.current = new Map(cached!.toolUseMap);
+      toolUseMapGlobal.current = toolUseMapRef.current;
+      const t1 = performance.now();
       setEntries([
         ...cached!.entries,
         { kind: "system", id: randomId(), text: "— resumed —" },
       ]);
       setResumingId(null);
       requestAnimationFrame(() => {
-        virtuosoRef.current?.scrollToIndex({
-          index: "LAST",
-          align: "end",
-          behavior: "auto",
+        const el = transcriptScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+        requestAnimationFrame(() => {
+          const dt = performance.now() - t0;
+          const dtSince = performance.now() - t1;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[resume:cache-hit] id=${sessionId.slice(0, 8)} entries=${cached!.entries.length} ` +
+              `total=${dt.toFixed(1)}ms paintAfterSetEntries=${dtSince.toFixed(1)}ms`,
+          );
         });
-        const dt = performance.now() - t0;
-        // eslint-disable-next-line no-console
-        console.log(`[resume:cache-hit] ${sessionId.slice(0, 8)} ${dt.toFixed(1)}ms to first paint`);
       });
     } else {
       toolUseMapRef.current = new Map();
+      toolUseMapGlobal.current = toolUseMapRef.current;
       setEntries([]);
       setResumingId(sessionId);
     }
@@ -969,6 +973,7 @@ function App() {
 
     if (!cacheHit) {
       try {
+        const tInvoke = performance.now();
         // Fetch only the tail — it's what we need to render immediately and
         // parses/serializes in tens of ms vs hundreds for a full load.
         const [events, repo] = await Promise.all([
@@ -980,23 +985,30 @@ function App() {
           getGithubRepo(useCwd),
         ]);
         if (!isLatest()) return;
+        const tParsed = performance.now();
         const { entries: history, toolUseMap } = buildHistory(events, repo);
+        const tBuilt = performance.now();
+        // eslint-disable-next-line no-console
+        console.log(
+          `[resume:cache-miss] id=${sessionId.slice(0, 8)} events=${events.length} ` +
+            `invoke=${(tParsed - tInvoke).toFixed(1)}ms ` +
+            `build=${(tBuilt - tParsed).toFixed(1)}ms ` +
+            `total=${(performance.now() - t0).toFixed(1)}ms`,
+        );
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
           mtime_ms: mtime,
         });
         toolUseMapRef.current = new Map(toolUseMap);
+        toolUseMapGlobal.current = toolUseMapRef.current;
         setEntries([
           ...history,
           { kind: "system", id: randomId(), text: "— resumed —" },
         ]);
         requestAnimationFrame(() => {
-          virtuosoRef.current?.scrollToIndex({
-            index: "LAST",
-            align: "end",
-            behavior: "auto",
-          });
+          const el = transcriptScrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
         });
       } catch (e) {
         if (isLatest()) {
@@ -1221,30 +1233,11 @@ function App() {
               )}
             </div>
           ) : (
-            <Virtuoso
-              // Re-mount per session so the new transcript shows at its
-              // initialTopMostItemIndex synchronously, skipping the diff &
-              // measurement settle when data identity changes. Items render
-              // via precompiled HTML (dangerouslySetInnerHTML), so the
-              // remount cost is trivial — just DOM node creation.
-              key={activeSessionId ?? "new"}
-              ref={virtuosoRef}
-              className="transcript"
-              data={entries}
-              computeItemKey={(_, entry) => entry.id}
-              itemContent={(_, entry) => (
-                <div className="transcript-row">
-                  <EntryView entry={entry} toolUseMap={toolUseMapRef.current} />
-                </div>
-              )}
-              followOutput={stuckToBottom ? "auto" : false}
-              atBottomStateChange={handleAtBottomChange}
-              atBottomThreshold={48}
-              initialTopMostItemIndex={Math.max(0, entries.length - 1)}
-              increaseViewportBy={200}
-              components={{
-                Footer: busy ? TypingIndicator : undefined,
-              }}
+            <PlainTranscript
+              entries={entries}
+              busy={busy}
+              scrollRef={transcriptScrollRef}
+              onAtBottomChange={handleAtBottomChange}
             />
           )}
           {!stuckToBottom && entries.length > 0 && (
@@ -1986,9 +1979,16 @@ function renderSessionItem(
   );
 }
 
-type EntryViewProps = { entry: Entry; toolUseMap: Map<string, ToolMeta> };
+// Module-level mirror of App's toolUseMapRef so memoized EntryViews don't
+// have to receive (and compare) the Map as a prop. ToolResultView reads
+// from this directly when it needs to look up the tool name/input.
+const toolUseMapGlobal: { current: Map<string, ToolMeta> } = {
+  current: new Map(),
+};
 
-const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
+type EntryViewProps = { entry: Entry };
+
+const EntryView = memo(({ entry }: EntryViewProps) => {
   if (entry.kind === "user") {
     return (
       <div className="msg msg-user">
@@ -2016,7 +2016,7 @@ const EntryView = memo(({ entry, toolUseMap }: EntryViewProps) => {
   }
 
   if (entry.kind === "tool_result") {
-    const meta = toolUseMap.get(entry.toolUseId);
+    const meta = toolUseMapGlobal.current.get(entry.toolUseId);
     return (
       <ToolResultView
         toolName={meta?.name}
@@ -2619,6 +2619,44 @@ function StreamingText({ text }: { text: string }) {
       {lines.map((line, i) => (
         <p key={i}>{line || "\u00A0"}</p>
       ))}
+    </div>
+  );
+}
+
+// Plain scrollable transcript — no virtualization, just DOM. For <= ~300
+// entries with precompiled HTML per message, this is dramatically faster
+// than Virtuoso's measurement pass on every session switch.
+function PlainTranscript({
+  entries,
+  busy,
+  scrollRef,
+  onAtBottomChange,
+}: {
+  entries: Entry[];
+  busy: boolean;
+  scrollRef: React.RefObject<HTMLDivElement>;
+  onAtBottomChange: (atBottom: boolean) => void;
+}) {
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+      onAtBottomChange(distance < 48);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [onAtBottomChange, scrollRef]);
+
+  return (
+    <div className="transcript plain" ref={scrollRef}>
+      {entries.map((entry) => (
+        <div key={entry.id} className="transcript-row">
+          <EntryView entry={entry} />
+        </div>
+      ))}
+      {busy && <TypingIndicator />}
     </div>
   );
 }
