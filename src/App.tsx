@@ -328,6 +328,19 @@ function App() {
     } catch {}
     return [];
   });
+  const [selectedGridPanelId, setSelectedGridPanelId] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!gridMode) return;
+    if (gridPanels.length === 0) {
+      if (selectedGridPanelId !== null) setSelectedGridPanelId(null);
+      return;
+    }
+    if (!selectedGridPanelId || !gridPanels.includes(selectedGridPanelId)) {
+      setSelectedGridPanelId(gridPanels[0]);
+    }
+  }, [gridMode, gridPanels, selectedGridPanelId]);
   useEffect(() => {
     localStorage.setItem("gridMode", gridMode ? "1" : "0");
   }, [gridMode]);
@@ -1200,7 +1213,21 @@ function App() {
         activeId={activeSessionId}
         loading={sessionsLoading}
         resumingId={resumingId}
-        onResume={resumeSession}
+        onResume={(id, cwd) => {
+          if (gridMode && selectedGridPanelId !== null) {
+            setGridPanels((prev) => {
+              const idx = prev.indexOf(selectedGridPanelId);
+              if (idx < 0) return prev;
+              if (prev.includes(id)) return prev; // don't dedupe a swap into a dup
+              const next = prev.slice();
+              next[idx] = id;
+              return next;
+            });
+            setSelectedGridPanelId(id);
+          } else {
+            resumeSession(id, cwd);
+          }
+        }}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
         cwd={cwd}
@@ -1328,6 +1355,8 @@ function App() {
             permissionMode={permissionMode}
             defaultCwd={cwd}
             defaultModel={model}
+            selectedId={selectedGridPanelId}
+            onSelect={setSelectedGridPanelId}
             onRemove={(id) =>
               setGridPanels((prev) => prev.filter((x) => x !== id))
             }
@@ -1365,6 +1394,7 @@ function App() {
           </section>
         )}
 
+        {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
           {attachments.length > 0 && (
             <div className="attachments">
@@ -1416,6 +1446,7 @@ function App() {
             <div className="drag-hint">drop files to attach</div>
           )}
         </footer>
+        )}
 
         <div className="statusbar">
           <div className="status-left">
@@ -2797,6 +2828,8 @@ function LiveGrid({
   permissionMode,
   defaultCwd,
   defaultModel,
+  selectedId,
+  onSelect,
   onRemove,
 }: {
   panels: string[];
@@ -2808,16 +2841,10 @@ function LiveGrid({
   permissionMode: string;
   defaultCwd: string;
   defaultModel: string;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
-  const [focused, setFocused] = useState<string | null>(panels[0] ?? null);
-  useEffect(() => {
-    if (panels.length === 0) {
-      setFocused(null);
-    } else if (!focused || !panels.includes(focused)) {
-      setFocused(panels[0]);
-    }
-  }, [panels, focused]);
   const panelCount = Math.max(1, Math.min(6, panels.length));
   const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
   return (
@@ -2835,11 +2862,11 @@ function LiveGrid({
             initialCwd={info?.cwd || defaultCwd}
             initialModel={info?.model || defaultModel}
             initialTitle={info?.title}
-            permissionMode={permissionMode}
+            permissionMode={info?.permission_mode || permissionMode}
             repo=""
             sessionCache={sessionCache}
-            isActive={focused === id}
-            onFocus={() => setFocused(id)}
+            isActive={selectedId === id}
+            onFocus={() => onSelect(id)}
             onRemove={() => onRemove(id)}
           />
         );
