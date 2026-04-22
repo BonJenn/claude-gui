@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -315,6 +315,18 @@ function App() {
   // start another (new / resumed session). The claude-done event checks this
   // so it doesn't show a stale "session ended" sysline mid-switch.
   const switchingSessionRef = useRef(false);
+  // Parsed-history cache: flipping back to a session you've already opened
+  // is instant. Keyed by session_id; the mtime_ms from list_sessions is used
+  // to invalidate when the session file has grown on disk.
+  const sessionCacheRef = useRef<
+    Map<
+      string,
+      { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+    >
+  >(new Map());
+  // Tracks which resume attempt is latest so an older slow load doesn't
+  // clobber a newer one if the user clicks quickly.
+  const resumeTokenRef = useRef(0);
 
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
@@ -379,6 +391,59 @@ function App() {
   useEffect(() => {
     refreshBranches(cwd);
   }, [cwd, refreshBranches]);
+
+  // Pre-warm the cache for recent sessions in the background so the first
+  // click on any of them is instant — not just the second.
+  useEffect(() => {
+    if (sessions.length === 0) return;
+    let cancelled = false;
+    const idle = (cb: () => void) => {
+      const w = window as typeof window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      };
+      if (typeof w.requestIdleCallback === "function") {
+        w.requestIdleCallback(cb, { timeout: 1500 });
+      } else {
+        setTimeout(cb, 100);
+      }
+    };
+    const prewarmOne = async (s: SessionInfo) => {
+      if (cancelled) return;
+      const existing = sessionCacheRef.current.get(s.id);
+      if (existing && existing.mtime_ms === s.mtime_ms) return;
+      try {
+        const events = await invoke<Array<Record<string, unknown>>>(
+          "load_session",
+          { sessionId: s.id, cwd: s.cwd },
+        );
+        if (cancelled) return;
+        const { entries, toolUseMap } = buildHistory(events);
+        sessionCacheRef.current.set(s.id, {
+          entries,
+          toolUseMap,
+          mtime_ms: s.mtime_ms,
+        });
+      } catch {
+        // ignore — a missing/unreadable session just means no prewarm for it
+      }
+    };
+    const queue = sessions.slice(0, 20);
+    const run = () => {
+      idle(async () => {
+        for (const s of queue) {
+          if (cancelled) return;
+          await prewarmOne(s);
+          await new Promise<void>((r) => idle(() => r()));
+        }
+      });
+    };
+    // Defer so initial render isn't competing with prewarm IPC.
+    const t = setTimeout(run, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [sessions]);
 
   const handleAtBottomChange = useCallback((atBottom: boolean) => {
     setStuckToBottom((prev) => (prev === atBottom ? prev : atBottom));
@@ -764,52 +829,43 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
-    // Restore the original model so the resumed turn keeps the same
-    // capabilities / context window the conversation started with.
+    const token = ++resumeTokenRef.current;
+    const isLatest = () => resumeTokenRef.current === token;
+
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
-    if (sessionModel) setModel(sessionModel);
+    const mtime = info?.mtime_ms ?? 0;
 
-    // Flag the switch so the about-to-die subprocess's claude-done event
-    // doesn't print a stale "session ended".
+    const cached = sessionCacheRef.current.get(sessionId);
+    const cacheHit = cached && cached.mtime_ms === mtime && mtime > 0;
+
+    // ---------- Single synchronous batch: swap entire view in one render ----------
+    // Everything below runs before any await so React 18 batches them into a
+    // single commit. If it's a cache hit, the transcript hops directly from
+    // the previous session's entries to the resumed ones — no empty flash,
+    // no startTransition delay, no "loading…" placeholder.
     switchingSessionRef.current = true;
-
-    // Instant visual feedback — all state flips BEFORE any await so the
-    // transcript clears and the sidebar highlight updates in the same frame.
-    resetSessionState();
+    if (sessionModel) setModel(sessionModel);
     setSessionOn(false);
     setActiveSessionId(sessionId);
-    setResumingId(sessionId);
     if (sessionCwd) setCwd(sessionCwd);
+    setStderrLines([]);
+    setSessionMeta(null);
+    setBusy(false);
+    setStuckToBottom(true);
+    setHasNewBelow(false);
+    setPreviewOpen(false);
+    setPreviewUrl("");
+    seenUrlsRef.current.clear();
+    streamingIdRef.current = null;
 
-    const useCwd = sessionCwd || cwd;
-
-    // start_session on the Rust side already kills any prior subprocess,
-    // so we skip awaiting stopSession. Fire load and start in parallel.
-    const startPromise = invoke("start_session", {
-      cwd: useCwd,
-      permissionMode,
-      model: sessionModel || model || null,
-      resumeId: sessionId,
-    });
-
-    try {
-      const events = await invoke<Array<Record<string, unknown>>>("load_session", {
-        sessionId,
-        cwd: useCwd,
-      });
-      const { entries: history, toolUseMap } = buildHistory(events);
-      toolUseMapRef.current = toolUseMap;
-      // startTransition lets the click feedback + loading indicator paint
-      // first, then commits the big history render without blocking input.
-      startTransition(() => {
-        setEntries((es) => [
-          ...history,
-          { kind: "system", id: randomId(), text: "— resumed —" },
-          ...es,
-        ]);
-      });
-      // Start at the bottom — the last exchange is where users want to pick up.
+    if (cacheHit) {
+      toolUseMapRef.current = new Map(cached!.toolUseMap);
+      setEntries([
+        ...cached!.entries,
+        { kind: "system", id: randomId(), text: "— resumed —" },
+      ]);
+      setResumingId(null);
       requestAnimationFrame(() => {
         virtuosoRef.current?.scrollToIndex({
           index: "LAST",
@@ -817,26 +873,74 @@ function App() {
           behavior: "auto",
         });
       });
-    } catch (e) {
-      setEntries((es) => [
-        ...es,
-        { kind: "system", id: randomId(), text: `failed to load history: ${e}` },
-      ]);
-    } finally {
-      setResumingId(null);
+    } else {
+      toolUseMapRef.current = new Map();
+      setEntries([]);
+      setResumingId(sessionId);
+    }
+
+    const useCwd = sessionCwd || cwd;
+
+    // Kick off the claude subprocess in parallel — it boots while we load.
+    const startPromise = invoke("start_session", {
+      cwd: useCwd,
+      permissionMode,
+      model: sessionModel || model || null,
+      resumeId: sessionId,
+    });
+
+    if (!cacheHit) {
+      try {
+        const events = await invoke<Array<Record<string, unknown>>>(
+          "load_session",
+          { sessionId, cwd: useCwd },
+        );
+        if (!isLatest()) return;
+        const { entries: history, toolUseMap } = buildHistory(events);
+        sessionCacheRef.current.set(sessionId, {
+          entries: history,
+          toolUseMap,
+          mtime_ms: mtime,
+        });
+        toolUseMapRef.current = new Map(toolUseMap);
+        setEntries([
+          ...history,
+          { kind: "system", id: randomId(), text: "— resumed —" },
+        ]);
+        requestAnimationFrame(() => {
+          virtuosoRef.current?.scrollToIndex({
+            index: "LAST",
+            align: "end",
+            behavior: "auto",
+          });
+        });
+      } catch (e) {
+        if (isLatest()) {
+          setEntries((es) => [
+            ...es,
+            { kind: "system", id: randomId(), text: `failed to load history: ${e}` },
+          ]);
+        }
+      } finally {
+        if (isLatest()) setResumingId(null);
+      }
     }
 
     try {
       await startPromise;
-      setSessionOn(true);
-      setTimeout(() => inputRef.current?.focus(), 0);
+      if (isLatest()) {
+        setSessionOn(true);
+        setTimeout(() => inputRef.current?.focus(), 0);
+      }
     } catch (e) {
-      setEntries((es) => [
-        ...es,
-        { kind: "system", id: randomId(), text: `failed to start: ${e}` },
-      ]);
+      if (isLatest()) {
+        setEntries((es) => [
+          ...es,
+          { kind: "system", id: randomId(), text: `failed to start: ${e}` },
+        ]);
+      }
     } finally {
-      switchingSessionRef.current = false;
+      if (isLatest()) switchingSessionRef.current = false;
     }
   }
 
