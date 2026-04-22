@@ -1137,11 +1137,6 @@ function App() {
             </div>
           ) : (
             <Virtuoso
-              // Keying on the session id remounts Virtuoso for each session
-              // switch, which lets it skip measurement deltas and show the
-              // new transcript synchronously at the bottom via
-              // initialTopMostItemIndex.
-              key={activeSessionId ?? "new"}
               ref={virtuosoRef}
               className="transcript"
               data={entries}
@@ -1644,19 +1639,12 @@ function Sidebar({
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // Scroll the active session into view at the top of the sidebar list.
+  // Scroll the active session to the very top of the sidebar list.
   useEffect(() => {
     if (!activeId) return;
     const el = itemRefs.current.get(activeId);
-    const list = listRef.current;
-    if (!el || !list) return;
-    const elTop = el.offsetTop;
-    const listScrollTop = list.scrollTop;
-    const elBottom = elTop + el.offsetHeight;
-    const listBottom = listScrollTop + list.clientHeight;
-    if (elTop < listScrollTop || elBottom > listBottom) {
-      list.scrollTo({ top: Math.max(0, elTop - 8), behavior: "smooth" });
-    }
+    if (!el) return;
+    el.scrollIntoView({ behavior: "auto", block: "start" });
   }, [activeId]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
