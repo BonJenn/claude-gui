@@ -996,7 +996,6 @@ function App() {
   }
 
   async function addNewGridPanel() {
-    if (gridPanels.length >= 6) return;
     let chosen: string | null = null;
     try {
       const selected = await openDialog({
@@ -1006,12 +1005,38 @@ function App() {
       });
       if (typeof selected === "string" && selected) chosen = selected;
     } catch (e) {
-      console.error("pick dir for new panel failed", e);
+      console.error("[addNewGridPanel] pick dir failed", e);
+      return;
     }
-    const targetCwd = chosen || cwd;
+    if (!chosen) return; // user cancelled the dialog
     const key = `new:${randomId()}:${Date.now()}`;
-    setNewPanelCwds((m) => ({ ...m, [key]: targetCwd }));
-    setGridPanels((prev) => [...prev, key]);
+    setNewPanelCwds((m) => ({ ...m, [key]: chosen! }));
+    // If we're at the 6-panel cap, replace the currently selected panel
+    // (falling back to the last) so the new session always appears.
+    if (gridPanels.length >= 6) {
+      const targetIdx = selectedGridPanelId
+        ? gridPanels.indexOf(selectedGridPanelId)
+        : gridPanels.length - 1;
+      const replacedId = gridPanels[targetIdx >= 0 ? targetIdx : gridPanels.length - 1];
+      setGridPanels((prev) => {
+        const next = prev.slice();
+        const idx = replacedId ? prev.indexOf(replacedId) : -1;
+        if (idx >= 0) next[idx] = key;
+        else next[prev.length - 1] = key;
+        return next;
+      });
+      // Clean up the replaced panel's cwd entry if it was a new-panel key.
+      if (replacedId && replacedId.startsWith("new:")) {
+        setNewPanelCwds((m) => {
+          if (!(replacedId in m)) return m;
+          const next = { ...m };
+          delete next[replacedId];
+          return next;
+        });
+      }
+    } else {
+      setGridPanels((prev) => [...prev, key]);
+    }
     setSelectedGridPanelId(key);
   }
 
