@@ -979,6 +979,7 @@ function App() {
 
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
+    const sessionPermissionMode = info?.permission_mode ?? "";
     const mtime = info?.mtime_ms ?? 0;
 
     const cached = sessionCacheRef.current.get(sessionId);
@@ -991,6 +992,7 @@ function App() {
     // no startTransition delay, no "loading…" placeholder.
     switchingSessionRef.current = true;
     if (sessionModel) setModel(sessionModel);
+    if (sessionPermissionMode) setPermissionMode(sessionPermissionMode);
     setSessionOn(false);
     setActiveSessionId(sessionId);
     if (sessionCwd) setCwd(sessionCwd);
@@ -1036,10 +1038,12 @@ function App() {
     const useCwd = sessionCwd || cwd;
 
     // Kick off the claude subprocess in parallel — it boots while we load.
+    // setPermissionMode above hasn't flushed yet, so send the session's own
+    // permission mode to start_session directly.
     const startPromise = invoke("start_session", {
       panelId: "main",
       cwd: useCwd,
-      permissionMode,
+      permissionMode: sessionPermissionMode || permissionMode,
       model: sessionModel || model || null,
       resumeId: sessionId,
     });

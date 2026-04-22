@@ -32,6 +32,7 @@ struct SessionInfo {
     total_cost_usd: f64,
     output_tokens: u64,
     model: String,
+    permission_mode: String,
 }
 
 fn context_limit_for(model: &str, max_observed: u64) -> u64 {
@@ -369,6 +370,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
     let mut output_tokens: u64 = 0;
     let mut total_cost: f64 = 0.0;
     let mut model = String::new();
+    let mut permission_mode = String::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -383,6 +385,11 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
             if let Some(s) = v.get("cwd").and_then(|x| x.as_str()) {
                 session_cwd = s.to_string();
             }
+        }
+        if let Some(pm) = v.get("permissionMode").and_then(|x| x.as_str()) {
+            // The most-recent permissionMode wins so toggling mid-session
+            // is preserved in the UI on resume.
+            permission_mode = pm.to_string();
         }
         let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
         match t {
@@ -486,6 +493,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         total_cost_usd: total_cost,
         output_tokens,
         model,
+        permission_mode,
     })
 }
 
