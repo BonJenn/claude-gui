@@ -420,6 +420,7 @@ body {
 }
 
 .session-title {
+  display: block;
   font-size: 12.5px;
   line-height: 1.35;
   white-space: nowrap;
@@ -430,6 +431,7 @@ body {
 }
 
 .session-project {
+  display: block;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--accent);

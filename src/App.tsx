@@ -1741,8 +1741,8 @@ function Sidebar({
               title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
             >
               {isLoading && <span className="session-loading-bar" />}
-              <div className="session-title">{s.title || "(untitled)"}</div>
-              <div className="session-project">{basename(s.cwd) || "unknown"}</div>
+              <span className="session-title">{s.title || "(untitled)"}</span>
+              <span className="session-project">{basename(s.cwd) || "unknown"}</span>
               <div className="session-bar">
                 <span className="session-bar-label">ctx</span>
                 <div className="session-bar-track">
