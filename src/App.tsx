@@ -10,9 +10,15 @@ import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { compileMarkdown } from "./markdown";
 import "./App.css";
 
-type TextBlock = { type: "text"; text: string; _streaming?: boolean };
+// Hoisted so they're stable across renders — creating them fresh each time
+// would break react-markdown's internal caches and blow up re-render cost.
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS = [rehypeHighlight];
+
+type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
 type ToolUseBlock = {
   type: "tool_use";
   id: string;
@@ -26,7 +32,12 @@ type ToolResultBlock = {
   content: string | Array<{ type: string; text?: string }>;
   is_error?: boolean;
 };
-type ThinkingBlock = { type: "thinking"; thinking: string; _streaming?: boolean };
+type ThinkingBlock = {
+  type: "thinking";
+  thinking: string;
+  _streaming?: boolean;
+  _html?: string;
+};
 type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
 type ToolMeta = { name: string; input: unknown };
@@ -150,7 +161,17 @@ function buildHistory(events: Array<Record<string, unknown>>): {
     if (t === "assistant") {
       const msg = ev.message as { id?: string; content?: Block[] } | undefined;
       const msgId = msg?.id ?? randomId();
-      const blocks = msg?.content ?? [];
+      const blocks = (msg?.content ?? []).map((b): Block => {
+        if (b.type === "text") {
+          const tb = b as TextBlock;
+          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+        }
+        if (b.type === "thinking") {
+          const thb = b as ThinkingBlock;
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+        }
+        return b;
+      });
       for (const b of blocks) {
         if (b.type === "tool_use") {
           const tu = b as ToolUseBlock;
@@ -531,8 +552,19 @@ function App() {
 
     if (ev.type === "assistant") {
       const msgId = ev.message.id;
-      recordToolUses(ev.message.content);
-      for (const b of ev.message.content) {
+      const blocks = ev.message.content.map((b): Block => {
+        if (b.type === "text") {
+          const tb = b as TextBlock;
+          return { ...tb, _html: compileMarkdown(tb.text ?? "") };
+        }
+        if (b.type === "thinking") {
+          const thb = b as ThinkingBlock;
+          return { ...thb, _html: compileMarkdown(thb.thinking ?? "") };
+        }
+        return b;
+      });
+      recordToolUses(blocks);
+      for (const b of blocks) {
         if (b.type === "text") {
           autoDetectUrl((b as TextBlock).text ?? "");
         }
@@ -543,12 +575,12 @@ function App() {
         );
         if (idx >= 0) {
           const next = es.slice();
-          next[idx] = { kind: "assistant", id: msgId, blocks: ev.message.content };
+          next[idx] = { kind: "assistant", id: msgId, blocks };
           return next;
         }
         return [
           ...es,
-          { kind: "assistant", id: msgId || randomId(), blocks: ev.message.content },
+          { kind: "assistant", id: msgId || randomId(), blocks },
         ];
       });
       return;
@@ -736,10 +768,14 @@ function App() {
         // finalized (markdown-rendered) view.
         const cleaned: Block = { ...b } as Block;
         if (cleaned.type === "text") {
-          delete (cleaned as TextBlock)._streaming;
+          const tb = cleaned as TextBlock;
+          delete tb._streaming;
+          tb._html = compileMarkdown(tb.text ?? "");
         }
         if (cleaned.type === "thinking") {
-          delete (cleaned as ThinkingBlock)._streaming;
+          const thb = cleaned as ThinkingBlock;
+          delete thb._streaming;
+          thb._html = compileMarkdown(thb.thinking ?? "");
         }
         if (cleaned.type === "tool_use") {
           const tu = cleaned as ToolUseBlock;
@@ -1142,6 +1178,12 @@ function App() {
             </div>
           ) : (
             <Virtuoso
+              // Re-mount per session so the new transcript shows at its
+              // initialTopMostItemIndex synchronously, skipping the diff &
+              // measurement settle when data identity changes. Items render
+              // via precompiled HTML (dangerouslySetInnerHTML), so the
+              // remount cost is trivial — just DOM node creation.
+              key={activeSessionId ?? "new"}
               ref={virtuosoRef}
               className="transcript"
               data={entries}
@@ -1155,7 +1197,7 @@ function App() {
               atBottomStateChange={handleAtBottomChange}
               atBottomThreshold={48}
               initialTopMostItemIndex={Math.max(0, entries.length - 1)}
-              increaseViewportBy={400}
+              increaseViewportBy={200}
               components={{
                 Footer: busy ? TypingIndicator : undefined,
               }}
@@ -1878,6 +1920,26 @@ const linkClickHandlerRef: { current: ((url: string) => void) | null } = {
   current: null,
 };
 
+// Event-delegation handler for precompiled markdown (dangerouslySetInnerHTML
+// path). Walks up the event target to find an anchor and routes external URLs
+// through the preview handler instead of letting the webview navigate.
+function handleMarkdownClick(e: React.MouseEvent<HTMLDivElement>) {
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  const anchor = target.closest("a") as HTMLAnchorElement | null;
+  if (!anchor) return;
+  const href = anchor.getAttribute("href");
+  if (!href) return;
+  if (!/^https?:\/\//i.test(href)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (linkClickHandlerRef.current) {
+    linkClickHandlerRef.current(href);
+  } else {
+    openUrl(href).catch((err) => console.error("openUrl failed:", err));
+  }
+}
+
 const mdComponents = {
   a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
     const isExternal = !!href && /^https?:\/\//i.test(href);
@@ -1914,11 +1976,21 @@ function BlockView({ block }: { block: Block }) {
     if (tb._streaming) {
       return <StreamingText text={text} />;
     }
+    // Precompiled HTML path — no React reconciliation inside the bubble.
+    if (tb._html) {
+      return (
+        <div
+          className="block text markdown"
+          dangerouslySetInnerHTML={{ __html: tb._html }}
+          onClick={handleMarkdownClick}
+        />
+      );
+    }
     return (
       <div className="block text markdown">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
           components={mdComponents}
         >
           {text}
@@ -1930,21 +2002,34 @@ function BlockView({ block }: { block: Block }) {
   if (block.type === "thinking") {
     const tb = block as ThinkingBlock;
     const t = tb.thinking ?? "";
+    if (tb._streaming) {
+      return (
+        <details className="block thinking" open>
+          <summary>thinking</summary>
+          <pre className="thinking-stream">{t}</pre>
+        </details>
+      );
+    }
+    if (tb._html) {
+      return (
+        <details className="block thinking" open>
+          <summary>thinking</summary>
+          <div
+            className="markdown"
+            dangerouslySetInnerHTML={{ __html: tb._html }}
+            onClick={handleMarkdownClick}
+          />
+        </details>
+      );
+    }
     return (
       <details className="block thinking" open>
         <summary>thinking</summary>
-        {tb._streaming ? (
-          <pre className="thinking-stream">{t}</pre>
-        ) : (
-          <div className="markdown">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={mdComponents}
-            >
-              {t}
-            </ReactMarkdown>
-          </div>
-        )}
+        <div className="markdown">
+          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={mdComponents}>
+            {t}
+          </ReactMarkdown>
+        </div>
       </details>
     );
   }
