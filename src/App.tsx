@@ -1726,10 +1726,18 @@ function Sidebar({
           const isActive = activeId === s.id;
           const isLoading = resumingId === s.id;
           return (
-            <button
+            <div
               key={s.id}
+              role="button"
+              tabIndex={0}
               className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
               onClick={() => onResume(s.id, s.cwd)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onResume(s.id, s.cwd);
+                }
+              }}
               title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
             >
               {isLoading && <span className="session-loading-bar" />}
@@ -1765,7 +1773,7 @@ function Sidebar({
                 <span>{relativeTime(s.mtime_ms)}</span>
                 <span className="session-count">{s.message_count} msg</span>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
