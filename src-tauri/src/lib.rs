@@ -244,6 +244,14 @@ async fn send_raw(
     Ok(())
 }
 
+// Writes arbitrary UTF-8 text to the given path. Used by the
+// "export session as markdown" action so we don't have to pull in
+// plugin-fs just for one write.
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| format!("write failed: {}", e))
+}
+
 #[tauri::command]
 async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
     let mut guard = state.sessions.lock().await;
@@ -847,7 +855,8 @@ pub fn run() {
             window_top_inset,
             load_session_tail,
             git_remote_url,
-            set_session_title
+            set_session_title,
+            write_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
