@@ -378,15 +378,6 @@ function App() {
     localStorage.setItem("gridPanels", JSON.stringify(gridPanels));
   }, [gridPanels]);
 
-  // When grid mode turns on with no panels yet, seed with the most recent
-  // sessions so the user sees something immediately.
-  useEffect(() => {
-    if (!gridMode) return;
-    if (gridPanels.length > 0) return;
-    if (sessions.length === 0) return;
-    const seed = sessions.slice(0, 6).map((s) => s.id);
-    setGridPanels(seed);
-  }, [gridMode, gridPanels.length, sessions]);
 
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
@@ -1296,16 +1287,35 @@ function App() {
         loading={sessionsLoading}
         resumingId={resumingId}
         onResume={(id, cwd) => {
-          if (gridMode && selectedGridPanelId !== null) {
-            setGridPanels((prev) => {
-              const idx = prev.indexOf(selectedGridPanelId);
-              if (idx < 0) return prev;
-              if (prev.includes(id)) return prev; // don't dedupe a swap into a dup
-              const next = prev.slice();
-              next[idx] = id;
-              return next;
-            });
-            setSelectedGridPanelId(id);
+          if (gridMode) {
+            // In grid mode: clicking a sidebar session either replaces the
+            // selected panel or appends a fresh panel (when empty / nothing
+            // selected / the session is already in the grid).
+            if (gridPanels.includes(id)) {
+              setSelectedGridPanelId(id);
+              return;
+            }
+            if (selectedGridPanelId && gridPanels.includes(selectedGridPanelId)) {
+              setGridPanels((prev) => {
+                const idx = prev.indexOf(selectedGridPanelId);
+                if (idx < 0) return prev;
+                const next = prev.slice();
+                next[idx] = id;
+                return next;
+              });
+              setSelectedGridPanelId(id);
+            } else if (gridPanels.length < 6) {
+              setGridPanels((prev) => [...prev, id]);
+              setSelectedGridPanelId(id);
+            } else {
+              // Full grid with no selection — replace the last panel.
+              setGridPanels((prev) => {
+                const next = prev.slice();
+                next[next.length - 1] = id;
+                return next;
+              });
+              setSelectedGridPanelId(id);
+            }
           } else {
             resumeSession(id, cwd);
           }
@@ -2941,6 +2951,27 @@ function LiveGrid({
   onRemove: (id: string) => void;
   onSessionStarted: (sessionId: string) => void;
 }) {
+  if (panels.length === 0) {
+    return (
+      <section className="grid-transcripts empty-grid">
+        <div className="grid-empty-hint">
+          <p>select one or more conversations to enter grid mode</p>
+          <p className="hint">
+            click a session in the sidebar to pin it here, or hit
+            <span className="inline-kbd">+ new panel</span> below to start a
+            fresh one.
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary grid-empty-new"
+            onClick={onAddPanel}
+          >
+            + new panel
+          </button>
+        </div>
+      </section>
+    );
+  }
   const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
   return (
