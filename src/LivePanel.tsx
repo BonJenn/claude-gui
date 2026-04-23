@@ -85,6 +85,19 @@ export function LivePanel({
   // Panel's current permission mode — starts at the prop, can change
   // if we restart the subprocess for "allow and retry".
   const currentModeRef = useRef(permissionMode);
+  // Attention state for the tile border: flashing orange when claude is
+  // waiting on the user (permission prompt), green when a task just
+  // finished successfully, red on error. Clears when the user focuses
+  // the panel so it's acknowledge-on-click.
+  const [attention, setAttention] = useState<
+    "permission" | "completed" | "error" | null
+  >(null);
+  useEffect(() => {
+    if (isActive) setAttention(null);
+  }, [isActive]);
+  useEffect(() => {
+    if (!pendingPermission && attention === "permission") setAttention(null);
+  }, [pendingPermission, attention]);
   const streamingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
@@ -172,6 +185,7 @@ export function LivePanel({
             toolName: String(req.tool_name ?? "unknown"),
             input: req.input,
           });
+          setAttention("permission");
         }
         return;
       }
@@ -328,6 +342,20 @@ export function LivePanel({
             }));
           if (parsed.length > 0) setPendingDenials(parsed);
         }
+        // Red wins over green: an earlier error shouldn't be cleared by a
+        // later successful result, per the "red until the user clicks"
+        // rule. Permission-flash is always superseded because by the time
+        // we see a result the prompt has been answered.
+        setAttention((prev) =>
+          ev.is_error ? "error" : prev === "error" ? prev : "completed",
+        );
+        return;
+      }
+
+      // Top-level error event (API failure etc.) — paint the tile red.
+      const evAny = ev as { type?: string };
+      if (evAny.type === "error") {
+        setAttention("error");
         return;
       }
     },
@@ -473,7 +501,9 @@ export function LivePanel({
 
   return (
     <div
-      className={`grid-panel live ${isActive ? "active" : ""}`}
+      className={`grid-panel live ${isActive ? "active" : ""} ${
+        attention ? `attention-${attention}` : ""
+      }`}
       onMouseDown={onFocus}
     >
       <header className="grid-panel-head">
