@@ -3545,7 +3545,6 @@ function ToolResultView({
   const name = toolName ?? "tool";
   const short = name === "TodoWrite" || name === "Edit" || name === "MultiEdit" || name === "Write";
   const lines = text.split("\n");
-  const isLong = lines.length > 18 || text.length > 1200;
   const input = (toolInput as Record<string, unknown>) ?? {};
 
   if (short && !isError) {
@@ -3561,6 +3560,14 @@ function ToolResultView({
   }
 
   const bodyClass = `tool-result-body ${name === "Bash" ? "terminal-out" : ""}`;
+  // Anything beyond a handful of lines is folded by default. Errors stay
+  // open so failures don't hide. <details>'s own toggle state is used so
+  // each individual result remembers its open/closed across re-renders.
+  const shouldFold = !isError && (lines.length > 4 || text.length > 240);
+  const firstLine = (lines.find((l) => l.trim().length > 0) || "").slice(0, 140);
+  const foldSummary = firstLine
+    ? `${firstLine}${lines.length > 1 ? " …" : ""}`
+    : `${lines.length} lines`;
 
   return (
     <div className={`tool-result ${isError ? "err" : ""}`}>
@@ -3569,9 +3576,11 @@ function ToolResultView({
         {isError && <span className="tool-tag err">error</span>}
         <span className="tool-result-meta">{lines.length} lines</span>
       </div>
-      {isLong ? (
-        <details>
-          <summary>show output</summary>
+      {shouldFold ? (
+        <details className="tool-result-fold">
+          <summary className="tool-result-fold-summary">
+            <span className="tool-result-fold-preview">{foldSummary}</span>
+          </summary>
           <pre className={bodyClass}>{text}</pre>
         </details>
       ) : (
