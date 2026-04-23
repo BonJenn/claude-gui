@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { compileMarkdown } from "./markdown";
+import { LivePanel } from "./LivePanel";
 import "./App.css";
 
 // Hoisted so they're stable across renders — creating them fresh each time
@@ -17,31 +18,31 @@ import "./App.css";
 const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS = [rehypeHighlight];
 
-type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
-type ToolUseBlock = {
+export type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
+export type ToolUseBlock = {
   type: "tool_use";
   id: string;
   name: string;
   input: unknown;
   _inputJson?: string;
 };
-type ToolResultBlock = {
+export type ToolResultBlock = {
   type: "tool_result";
   tool_use_id: string;
   content: string | Array<{ type: string; text?: string }>;
   is_error?: boolean;
 };
-type ThinkingBlock = {
+export type ThinkingBlock = {
   type: "thinking";
   thinking: string;
   _streaming?: boolean;
   _html?: string;
 };
-type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
+export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
-type ToolMeta = { name: string; input: unknown };
+export type ToolMeta = { name: string; input: unknown };
 
-type Entry =
+export type Entry =
   | { kind: "user"; id: string; text: string }
   | { kind: "assistant"; id: string; blocks: Block[] }
   | {
@@ -54,7 +55,7 @@ type Entry =
   | { kind: "system"; id: string; text: string }
   | { kind: "result"; id: string; text: string; isError?: boolean };
 
-type StreamEvent =
+export type StreamEvent =
   | {
       type: "system";
       subtype: string;
@@ -88,7 +89,7 @@ type StreamEvent =
       session_id?: string;
     };
 
-type PartialEvent =
+export type PartialEvent =
   | { type: "message_start"; message: { id: string } }
   | { type: "content_block_start"; index: number; content_block: Block }
   | {
@@ -125,7 +126,7 @@ type BranchInfo = {
   dirty: boolean;
 };
 
-const REPLAY_SKIP = new Set([
+export const REPLAY_SKIP = new Set([
   "queue-operation",
   "last-prompt",
   "ai-title",
@@ -139,7 +140,7 @@ const REPLAY_SKIP = new Set([
 // rendering is essentially free on click.
 const SESSION_TAIL_LIMIT = 200;
 
-function randomId() {
+export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
@@ -160,7 +161,7 @@ async function getGithubRepo(cwd: string): Promise<string> {
   }
 }
 
-function buildHistory(
+export function buildHistory(
   events: Array<Record<string, unknown>>,
   repo?: string,
 ): {
@@ -314,6 +315,69 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sidebar.groupByProject", groupByProject ? "1" : "0");
   }, [groupByProject]);
+  const [gridMode, setGridMode] = useState<boolean>(() => {
+    return localStorage.getItem("gridMode") === "1";
+  });
+  const [gridPanels, setGridPanels] = useState<string[]>(() => {
+    const saved = localStorage.getItem("gridPanels");
+    if (!saved) return [];
+    try {
+      const parsed = JSON.parse(saved) as unknown;
+      if (Array.isArray(parsed))
+        return parsed.filter((v): v is string => typeof v === "string").slice(0, 6);
+    } catch {}
+    return [];
+  });
+  // Panels that don't correspond to an existing session yet — they come
+  // from the "+ new panel" button and carry a user-picked cwd until a
+  // session is spawned on first message. Keyed by synthetic panel id.
+  const [newPanelCwds, setNewPanelCwds] = useState<Record<string, string>>(
+    () => {
+      const saved = localStorage.getItem("newPanelCwds");
+      if (!saved) return {};
+      try {
+        const parsed = JSON.parse(saved) as unknown;
+        if (parsed && typeof parsed === "object")
+          return parsed as Record<string, string>;
+      } catch {}
+      return {};
+    },
+  );
+  useEffect(() => {
+    localStorage.setItem("newPanelCwds", JSON.stringify(newPanelCwds));
+  }, [newPanelCwds]);
+  const [selectedGridPanelId, setSelectedGridPanelId] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!gridMode) return;
+    if (gridPanels.length === 0) {
+      if (selectedGridPanelId !== null) setSelectedGridPanelId(null);
+      return;
+    }
+    if (!selectedGridPanelId || !gridPanels.includes(selectedGridPanelId)) {
+      setSelectedGridPanelId(gridPanels[0]);
+    }
+  }, [gridMode, gridPanels, selectedGridPanelId]);
+
+  // In grid mode, the topbar mirrors whichever panel is currently selected
+  // so cwd/branch/model/permissions stay in sync with what the user is
+  // looking at. Nothing here touches the main-session subprocess.
+  useEffect(() => {
+    if (!gridMode || !selectedGridPanelId) return;
+    const info = sessions.find((s) => s.id === selectedGridPanelId);
+    if (!info) return;
+    if (info.cwd) setCwd(info.cwd);
+    if (info.model) setModel(info.model);
+    if (info.permission_mode) setPermissionMode(info.permission_mode);
+  }, [gridMode, selectedGridPanelId, sessions]);
+  useEffect(() => {
+    localStorage.setItem("gridMode", gridMode ? "1" : "0");
+  }, [gridMode]);
+  useEffect(() => {
+    localStorage.setItem("gridPanels", JSON.stringify(gridPanels));
+  }, [gridPanels]);
+
 
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
@@ -548,18 +612,24 @@ function App() {
 
   useEffect(() => {
     const pending: Promise<() => void>[] = [
-      listen<string>("claude-event", (e) => {
+      listen<{ panel_id: string; line: string }>("claude-event", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const line = e.payload?.line;
+        if (typeof line !== "string") return;
         try {
-          const ev = JSON.parse(e.payload) as StreamEvent;
+          const ev = JSON.parse(line) as StreamEvent;
           handleEvent(ev);
         } catch (err) {
-          console.error("bad claude-event payload", err, e.payload);
+          console.error("bad claude-event payload", err, line);
         }
       }),
-      listen<string>("claude-stderr", (e) => {
-        setStderrLines((s) => [...s, e.payload]);
+      listen<{ panel_id: string; line: string }>("claude-stderr", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const line = e.payload?.line ?? "";
+        if (line) setStderrLines((s) => [...s, line]);
       }),
-      listen("claude-done", () => {
+      listen<{ panel_id: string }>("claude-done", (e) => {
+        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
         // Ignore the done event from a subprocess we just killed to switch
         // to another session; otherwise the transcript flickers a spurious
         // "session ended" message.
@@ -897,6 +967,13 @@ function App() {
   }
 
   async function newSession() {
+    // In grid mode "+ new session" opens a directory picker and appends a
+    // fresh empty panel that'll spawn its subprocess in that cwd once the
+    // user sends a first message.
+    if (gridMode) {
+      await addNewGridPanel();
+      return;
+    }
     if (sessionOn) {
       switchingSessionRef.current = true;
       try {
@@ -907,6 +984,51 @@ function App() {
     }
     resetSessionState();
     setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  async function addNewGridPanel() {
+    let chosen: string | null = null;
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: cwd,
+      });
+      if (typeof selected === "string" && selected) chosen = selected;
+    } catch (e) {
+      console.error("[addNewGridPanel] pick dir failed", e);
+      return;
+    }
+    if (!chosen) return; // user cancelled the dialog
+    const key = `new:${randomId()}:${Date.now()}`;
+    setNewPanelCwds((m) => ({ ...m, [key]: chosen! }));
+    // If we're at the 6-panel cap, replace the currently selected panel
+    // (falling back to the last) so the new session always appears.
+    if (gridPanels.length >= 6) {
+      const targetIdx = selectedGridPanelId
+        ? gridPanels.indexOf(selectedGridPanelId)
+        : gridPanels.length - 1;
+      const replacedId = gridPanels[targetIdx >= 0 ? targetIdx : gridPanels.length - 1];
+      setGridPanels((prev) => {
+        const next = prev.slice();
+        const idx = replacedId ? prev.indexOf(replacedId) : -1;
+        if (idx >= 0) next[idx] = key;
+        else next[prev.length - 1] = key;
+        return next;
+      });
+      // Clean up the replaced panel's cwd entry if it was a new-panel key.
+      if (replacedId && replacedId.startsWith("new:")) {
+        setNewPanelCwds((m) => {
+          if (!(replacedId in m)) return m;
+          const next = { ...m };
+          delete next[replacedId];
+          return next;
+        });
+      }
+    } else {
+      setGridPanels((prev) => [...prev, key]);
+    }
+    setSelectedGridPanelId(key);
   }
 
   async function onSwitchBranch(branch: string) {
@@ -943,6 +1065,7 @@ function App() {
 
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
+    const sessionPermissionMode = info?.permission_mode ?? "";
     const mtime = info?.mtime_ms ?? 0;
 
     const cached = sessionCacheRef.current.get(sessionId);
@@ -955,6 +1078,7 @@ function App() {
     // no startTransition delay, no "loading…" placeholder.
     switchingSessionRef.current = true;
     if (sessionModel) setModel(sessionModel);
+    if (sessionPermissionMode) setPermissionMode(sessionPermissionMode);
     setSessionOn(false);
     setActiveSessionId(sessionId);
     if (sessionCwd) setCwd(sessionCwd);
@@ -1000,9 +1124,12 @@ function App() {
     const useCwd = sessionCwd || cwd;
 
     // Kick off the claude subprocess in parallel — it boots while we load.
+    // setPermissionMode above hasn't flushed yet, so send the session's own
+    // permission mode to start_session directly.
     const startPromise = invoke("start_session", {
+      panelId: "main",
       cwd: useCwd,
-      permissionMode,
+      permissionMode: sessionPermissionMode || permissionMode,
       model: sessionModel || model || null,
       resumeId: sessionId,
     });
@@ -1078,7 +1205,7 @@ function App() {
 
   async function stopSession() {
     try {
-      await invoke("stop_session");
+      await invoke("stop_session", { panelId: "main" });
     } finally {
       setSessionOn(false);
       setBusy(false);
@@ -1087,7 +1214,7 @@ function App() {
 
   async function interruptTurn() {
     try {
-      await invoke("interrupt_session");
+      await invoke("interrupt_session", { panelId: "main" });
     } catch (e) {
       console.error("interrupt failed", e);
     }
@@ -1100,6 +1227,7 @@ function App() {
     if (!sessionOn) {
       try {
         await invoke("start_session", {
+          panelId: "main",
           cwd,
           permissionMode,
           model: model || null,
@@ -1135,7 +1263,7 @@ function App() {
     setStuckToBottom(true);
     setHasNewBelow(false);
     try {
-      await invoke("send_message", { text: body });
+      await invoke("send_message", { panelId: "main", text: body });
     } catch (e) {
       setBusy(false);
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
@@ -1155,10 +1283,49 @@ function App() {
     <div className="root">
       <Sidebar
         sessions={sessions}
-        activeId={activeSessionId}
+        activeId={gridMode ? undefined : activeSessionId}
         loading={sessionsLoading}
         resumingId={resumingId}
-        onResume={resumeSession}
+        onResume={(id, cwd) => {
+          if (gridMode) {
+            // Clicking a sidebar session:
+            //   * if it's already in the grid → focus it
+            //   * if there's an empty slot → append (don't touch selection)
+            //   * if the grid is full → replace the selected panel (or last)
+            if (gridPanels.includes(id)) {
+              setSelectedGridPanelId(id);
+              return;
+            }
+            if (gridPanels.length < 6) {
+              setGridPanels((prev) => [...prev, id]);
+              setSelectedGridPanelId(id);
+              return;
+            }
+            // Full grid — replace the selected panel (or last).
+            const targetId =
+              selectedGridPanelId && gridPanels.includes(selectedGridPanelId)
+                ? selectedGridPanelId
+                : gridPanels[gridPanels.length - 1];
+            setGridPanels((prev) => {
+              const idx = prev.indexOf(targetId);
+              if (idx < 0) return prev;
+              const next = prev.slice();
+              next[idx] = id;
+              return next;
+            });
+            if (targetId.startsWith("new:")) {
+              setNewPanelCwds((m) => {
+                if (!(targetId in m)) return m;
+                const next = { ...m };
+                delete next[targetId];
+                return next;
+              });
+            }
+            setSelectedGridPanelId(id);
+          } else {
+            resumeSession(id, cwd);
+          }
+        }}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
         cwd={cwd}
@@ -1254,6 +1421,14 @@ function App() {
                 <option value="plan">plan</option>
               </select>
             </label>
+            <button
+              type="button"
+              className={`btn btn-secondary grid-mode-toggle ${gridMode ? "active" : ""}`}
+              onClick={() => setGridMode((v) => !v)}
+              title="grid mode (show up to 6 conversations)"
+            >
+              ⊞ grid
+            </button>
             <div className="theme-toggle" role="group" aria-label="theme">
               {(["light", "dark", "jet"] as const).map((t) => (
                 <button
@@ -1270,7 +1445,31 @@ function App() {
           </div>
         </header>
 
-        <section className="transcript-wrap">
+        <div className={`grid-wrap ${gridMode ? "" : "hidden"}`}>
+          <LiveGrid
+            panels={gridPanels}
+            sessions={sessions}
+            sessionCache={sessionCacheRef.current}
+            permissionMode={permissionMode}
+            defaultCwd={cwd}
+            defaultModel={model}
+            selectedId={selectedGridPanelId}
+            onSelect={setSelectedGridPanelId}
+            onAddPanel={addNewGridPanel}
+            newPanelCwds={newPanelCwds}
+            onSessionStarted={() => refreshSessions()}
+            onRemove={(id) => {
+              setGridPanels((prev) => prev.filter((x) => x !== id));
+              setNewPanelCwds((m) => {
+                if (!(id in m)) return m;
+                const next = { ...m };
+                delete next[id];
+                return next;
+              });
+            }}
+          />
+        </div>
+        <section className={`transcript-wrap ${gridMode ? "hidden" : ""}`}>
           {entries.length === 0 ? (
             <div className="empty">
               {resumingId ? (
@@ -1301,6 +1500,7 @@ function App() {
           )}
         </section>
 
+        {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
           {attachments.length > 0 && (
             <div className="attachments">
@@ -1352,6 +1552,7 @@ function App() {
             <div className="drag-hint">drop files to attach</div>
           )}
         </footer>
+        )}
 
         <div className="statusbar">
           <div className="status-left">
@@ -2057,15 +2258,35 @@ function renderSessionItem(
 }
 
 // Module-level mirror of App's toolUseMapRef so memoized EntryViews don't
-// have to receive (and compare) the Map as a prop. ToolResultView reads
-// from this directly when it needs to look up the tool name/input.
+// have to receive (and compare) the Map as a prop. Keyed by panel so each
+// LivePanel in grid mode can have its own tool registry.
+const panelToolUseMaps = new Map<string, Map<string, ToolMeta>>();
+// Back-compat shim for the main single-panel path.
 const toolUseMapGlobal: { current: Map<string, ToolMeta> } = {
-  current: new Map(),
+  current: (() => {
+    const m = new Map<string, ToolMeta>();
+    panelToolUseMaps.set("main", m);
+    return m;
+  })(),
 };
 
-type EntryViewProps = { entry: Entry };
+export function toolUseMapForPanel(
+  panelId: string,
+): Map<string, ToolMeta> | undefined {
+  return panelToolUseMaps.get(panelId);
+}
 
-const EntryView = memo(({ entry }: EntryViewProps) => {
+export function setToolUseMapForPanel(
+  panelId: string,
+  map: Map<string, ToolMeta> | null,
+): void {
+  if (map) panelToolUseMaps.set(panelId, map);
+  else panelToolUseMaps.delete(panelId);
+}
+
+type EntryViewProps = { entry: Entry; panelId?: string };
+
+export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
   if (entry.kind === "user") {
     return (
       <div className="msg msg-user">
@@ -2093,7 +2314,9 @@ const EntryView = memo(({ entry }: EntryViewProps) => {
   }
 
   if (entry.kind === "tool_result") {
-    const meta = toolUseMapGlobal.current.get(entry.toolUseId);
+    const map =
+      panelToolUseMaps.get(panelId) ?? toolUseMapGlobal.current;
+    const meta = map.get(entry.toolUseId);
     return (
       <ToolResultView
         toolName={meta?.name}
@@ -2703,6 +2926,194 @@ function StreamingText({ text }: { text: string }) {
 // Plain scrollable transcript — no virtualization, just DOM. For <= ~300
 // entries with precompiled HTML per message, this is dramatically faster
 // than Virtuoso's measurement pass on every session switch.
+// Grid of up to 6 LIVE session panels, each with its own claude subprocess.
+function LiveGrid({
+  panels,
+  sessions,
+  sessionCache,
+  permissionMode,
+  defaultCwd,
+  defaultModel,
+  selectedId,
+  newPanelCwds,
+  onAddPanel,
+  onSelect,
+  onRemove,
+  onSessionStarted,
+}: {
+  panels: string[];
+  sessions: SessionInfo[];
+  sessionCache: Map<
+    string,
+    { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+  >;
+  permissionMode: string;
+  defaultCwd: string;
+  defaultModel: string;
+  selectedId: string | null;
+  newPanelCwds: Record<string, string>;
+  onAddPanel: () => void;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+  onSessionStarted: (sessionId: string) => void;
+}) {
+  if (panels.length === 0) {
+    return (
+      <section className="grid-transcripts empty-grid">
+        <div className="grid-empty-hint">
+          <p>select one or more conversations to enter grid mode</p>
+          <p className="hint">
+            click a session in the sidebar to pin it here, or hit
+            <span className="inline-kbd">+ new panel</span> below to start a
+            fresh one.
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary grid-empty-new"
+            onClick={onAddPanel}
+          >
+            + new panel
+          </button>
+        </div>
+      </section>
+    );
+  }
+  const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
+  const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
+  return (
+    <section
+      className="grid-transcripts live"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {panels.map((id) => {
+        const info = sessions.find((s) => s.id === id);
+        const isNewPanel = id in newPanelCwds;
+        const panelCwd = isNewPanel
+          ? newPanelCwds[id]
+          : info?.cwd || defaultCwd;
+        const panelModel = isNewPanel
+          ? defaultModel
+          : info?.model || defaultModel;
+        return (
+          <LivePanel
+            key={id}
+            panelId={id}
+            initialSessionId={isNewPanel ? undefined : id}
+            initialCwd={panelCwd}
+            initialModel={panelModel}
+            initialTitle={isNewPanel ? "new session" : info?.title}
+            permissionMode={info?.permission_mode || permissionMode}
+            repo=""
+            sessionCache={sessionCache}
+            isActive={selectedId === id}
+            onFocus={() => onSelect(id)}
+            onRemove={() => onRemove(id)}
+            onSessionStarted={onSessionStarted}
+          />
+        );
+      })}
+      {panels.length < 6 && (
+        <button
+          type="button"
+          className="grid-add-tile"
+          onClick={onAddPanel}
+          title="add panel"
+        >
+          <span className="grid-add-plus">+</span>
+          <span className="grid-add-label">new panel</span>
+        </button>
+      )}
+    </section>
+  );
+}
+
+// Grid overview of up to 6 cached session transcripts. Each panel shows a
+// lightweight preview (last ~40 entries from cache) plus a click-to-activate
+// button so the user can quickly bring one to the front.
+function GridTranscripts({
+  panels,
+  sessions,
+  cache,
+  activeId,
+  onActivate,
+  onRemove,
+}: {
+  panels: string[];
+  sessions: SessionInfo[];
+  cache: Map<
+    string,
+    { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
+  >;
+  activeId?: string;
+  onActivate: (id: string, cwd: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const panelCount = Math.max(1, Math.min(6, panels.length));
+  const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
+  return (
+    <section
+      className="grid-transcripts"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {panels.map((id) => {
+        const info = sessions.find((s) => s.id === id);
+        const cached = cache.get(id);
+        const entries = cached?.entries ?? [];
+        const tail = entries.slice(-40);
+        const title = info?.title || "(untitled)";
+        const project = info ? basename(info.cwd) || "unknown" : "";
+        const isActive = activeId === id;
+        return (
+          <div
+            key={id}
+            className={`grid-panel ${isActive ? "active" : ""}`}
+          >
+            <header className="grid-panel-head">
+              <div className="grid-panel-title" title={title}>
+                {title}
+              </div>
+              <div className="grid-panel-meta">
+                <span className="grid-panel-project">{project}</span>
+                <button
+                  type="button"
+                  className="grid-panel-activate"
+                  onClick={() => info && onActivate(info.id, info.cwd)}
+                  disabled={!info || isActive}
+                  title={isActive ? "active" : "open as the active session"}
+                >
+                  {isActive ? "● active" : "open"}
+                </button>
+                <button
+                  type="button"
+                  className="grid-panel-close"
+                  onClick={() => onRemove(id)}
+                  title="remove from grid"
+                  aria-label="remove"
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <div className="grid-panel-body">
+              {!cached ? (
+                <div className="grid-panel-empty">still caching…</div>
+              ) : tail.length === 0 ? (
+                <div className="grid-panel-empty">no messages yet</div>
+              ) : (
+                tail.map((e) => (
+                  <div key={e.id} className="transcript-row">
+                    <EntryView entry={e} />
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 function PlainTranscript({
   entries,
   busy,
@@ -2738,7 +3149,7 @@ function PlainTranscript({
   );
 }
 
-function TypingIndicator() {
+export function TypingIndicator() {
   return (
     <div className="typing">
       <span /><span /><span />
