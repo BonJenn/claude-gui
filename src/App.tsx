@@ -2195,8 +2195,11 @@ function renderSessionItem(
 ) {
   const ctxRatio =
     s.context_limit > 0 ? Math.min(1, s.context_tokens / s.context_limit) : 0;
-  const costBudget = 5;
-  const costRatio = Math.min(1, s.total_cost_usd / costBudget);
+  // Cost is a per-token API-equivalent figure; on Max it isn't real money
+  // so we show output tokens as the secondary usage bar. Once the user
+  // wires in an API key we can swap this back to $.
+  const outputBudget = 200_000;
+  const outputRatio = Math.min(1, s.output_tokens / outputBudget);
   const isActive = ctx.activeId === s.id;
   const isLoading = ctx.resumingId === s.id;
   return (
@@ -2237,17 +2240,17 @@ function renderSessionItem(
         <span className="session-bar-value">{formatTokens(s.context_tokens)}</span>
       </div>
       <div className="session-bar">
-        <span className="session-bar-label">$</span>
+        <span className="session-bar-label">out</span>
         <div className="session-bar-track">
           <div
             className="session-bar-fill"
             style={{
-              width: `${(costRatio * 100).toFixed(1)}%`,
-              background: barColor(costRatio),
+              width: `${(outputRatio * 100).toFixed(1)}%`,
+              background: barColor(outputRatio),
             }}
           />
         </div>
-        <span className="session-bar-value">${s.total_cost_usd.toFixed(2)}</span>
+        <span className="session-bar-value">{formatTokens(s.output_tokens)}</span>
       </div>
       <div className="session-meta">
         <span>{relativeTime(s.mtime_ms)}</span>
