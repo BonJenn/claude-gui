@@ -13,10 +13,12 @@ import {
   type ToolResultBlock,
   type ToolMeta,
   randomId,
+  buildHistory,
   EntryView,
   TypingIndicator,
   setToolUseMapForPanel,
   EditableTitle,
+  SESSION_TAIL_LIMIT,
 } from "./App";
 
 // A self-contained live session. Each LivePanel owns its own subprocess,
@@ -90,6 +92,53 @@ export function LivePanel({
     setToolUseMapForPanel(panelId, toolUseMap);
     return () => setToolUseMapForPanel(panelId, null);
   }, [panelId, toolUseMap]);
+
+  // Lazily load history for pinned sessions when the in-memory cache is
+  // cold (e.g. fresh app start before prewarm has reached this session).
+  // Without this, the tile would be blank until the user sends a message
+  // and claude starts emitting fresh events.
+  const historyLoadedRef = useRef(false);
+  useEffect(() => {
+    if (historyLoadedRef.current) return;
+    if (!initialSessionId || !initialCwd) return;
+    if (entries.length > 0) {
+      historyLoadedRef.current = true;
+      return;
+    }
+    historyLoadedRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const events = await invoke<Array<Record<string, unknown>>>(
+          "load_session_tail",
+          {
+            sessionId: initialSessionId,
+            cwd: initialCwd,
+            limit: SESSION_TAIL_LIMIT,
+          },
+        );
+        if (cancelled) return;
+        const { entries: history, toolUseMap: loadedMap } = buildHistory(
+          events,
+          repo,
+        );
+        for (const [k, v] of loadedMap) toolUseMap.set(k, v);
+        setEntries(history);
+        sessionCache.set(initialSessionId, {
+          entries: history,
+          toolUseMap: loadedMap,
+          mtime_ms: 0,
+        });
+      } catch {
+        // Best-effort — if load fails, the panel stays empty until the
+        // user's next message brings fresh events.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSessionId, initialCwd]);
 
   const handleEvent = useCallback(
     (ev: StreamEvent) => {
@@ -216,12 +265,34 @@ export function LivePanel({
         streamingIdRef.current = null;
         const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
         const dur = ev.duration_ms != null ? ` • ${(ev.duration_ms / 1000).toFixed(1)}s` : "";
+        // Claude surfaces the real failure reason in one of several
+        // places depending on CLI version: a top-level `error` string,
+        // or an `errors` array. Check both so the user sees something
+        // actionable instead of the opaque `error_during_execution`.
+        const rawErr = (ev as { error?: unknown }).error;
+        const rawErrs = (ev as { errors?: unknown }).errors;
+        const errorDetail =
+          typeof rawErr === "string"
+            ? rawErr
+            : Array.isArray(rawErrs)
+            ? rawErrs
+                .filter((s): s is string => typeof s === "string")
+                .join(" • ")
+            : "";
+        if (ev.is_error) {
+          // eslint-disable-next-line no-console
+          console.error(`[panel:${panelId}] result error`, ev);
+        }
+        const text =
+          ev.is_error && errorDetail
+            ? `error • ${errorDetail}${cost}${dur}`
+            : `${ev.subtype}${cost}${dur}`;
         setEntries((es) => [
           ...es,
           {
             kind: "result",
             id: randomId(),
-            text: `${ev.subtype}${cost}${dur}`,
+            text,
             isError: ev.is_error,
           },
         ]);
@@ -262,6 +333,7 @@ export function LivePanel({
   useEffect(() => {
     let off1: (() => void) | null = null;
     let off2: (() => void) | null = null;
+    let off3: (() => void) | null = null;
     const p1 = listen<{ panel_id: string; line: string }>(
       "claude-event",
       (e) => {
@@ -280,11 +352,26 @@ export function LivePanel({
       setSessionOn(false);
       setBusy(false);
     });
+    // Mirror stderr to the console so grid-panel spawn failures are
+    // diagnosable without wiring up a per-panel stderr drawer.
+    const p3 = listen<{ panel_id: string; line: string }>(
+      "claude-stderr",
+      (e) => {
+        if (e.payload?.panel_id !== panelId) return;
+        const line = e.payload?.line ?? "";
+        if (line) {
+          // eslint-disable-next-line no-console
+          console.warn(`[panel:${panelId}] stderr`, line);
+        }
+      },
+    );
     p1.then((u) => (off1 = u)).catch(() => {});
     p2.then((u) => (off2 = u)).catch(() => {});
+    p3.then((u) => (off3 = u)).catch(() => {});
     return () => {
       if (off1) off1();
       if (off2) off2();
+      if (off3) off3();
     };
   }, [panelId, handleEvent]);
 

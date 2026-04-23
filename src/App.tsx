@@ -144,10 +144,25 @@ export const REPLAY_SKIP = new Set([
 // How many recent messages to show when opening a session. Big enough to
 // cover the recent context of most turns, small enough that parsing +
 // rendering is essentially free on click.
-const SESSION_TAIL_LIMIT = 200;
+export const SESSION_TAIL_LIMIT = 200;
 
 export function randomId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// Heuristic: match the couple of ways the claude CLI surfaces a bad
+// credential — stderr prefix, stringified API error JSON, or the plain
+// 401 message. Kept loose on purpose since we can't rely on exact wording
+// across CLI versions.
+export function isAuthErrorText(text: string): boolean {
+  if (!text) return false;
+  const s = text.toLowerCase();
+  return (
+    s.includes("authentication_error") ||
+    s.includes("failed to authenticate") ||
+    s.includes("invalid authentication credentials") ||
+    (s.includes("401") && s.includes("auth"))
+  );
 }
 
 // Module-level cache keyed by cwd. `undefined` = not yet queried.
@@ -306,6 +321,11 @@ function App() {
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Set when we detect the claude CLI is running with bad credentials
+  // (expired OAuth token, stale API key). Renders a blocking modal that
+  // tells the user to re-auth and restart — the CLI only reloads its
+  // auth file at startup.
+  const [authErrorSeen, setAuthErrorSeen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [showStderr, setShowStderr] = useState(false);
@@ -738,7 +758,9 @@ function App() {
       listen<{ panel_id: string; line: string }>("claude-stderr", (e) => {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
         const line = e.payload?.line ?? "";
-        if (line) setStderrLines((s) => [...s, line]);
+        if (!line) return;
+        setStderrLines((s) => [...s, line]);
+        if (isAuthErrorText(line)) setAuthErrorSeen(true);
       }),
       listen<{ panel_id: string }>("claude-done", (e) => {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
@@ -920,9 +942,19 @@ function App() {
       streamingIdRef.current = null;
       const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
       const dur = ev.duration_ms != null ? ` • ${(ev.duration_ms / 1000).toFixed(1)}s` : "";
+      // Claude surfaces the real failure reason in one of several places
+      // depending on CLI version: a top-level `error` string, or an
+      // `errors` array. Read both so the user sees something actionable
+      // rather than the opaque `error_during_execution`.
+      const rawErr = (ev as { error?: unknown }).error;
+      const rawErrs = (ev as { errors?: unknown }).errors;
       const errorDetail =
-        typeof (ev as { error?: unknown }).error === "string"
-          ? ((ev as { error?: string }).error as string)
+        typeof rawErr === "string"
+          ? rawErr
+          : Array.isArray(rawErrs)
+          ? rawErrs
+              .filter((s): s is string => typeof s === "string")
+              .join(" • ")
           : "";
       const text =
         ev.is_error && errorDetail
@@ -943,16 +975,21 @@ function App() {
     const evAny = ev as { type?: string; error?: unknown; message?: unknown };
     if (evAny.type === "error") {
       setBusy(false);
-      const errObj = evAny.error as { message?: string } | string | undefined;
+      const errObj = evAny.error as { message?: string; type?: string } | string | undefined;
       const msg =
         typeof errObj === "string"
           ? errObj
           : errObj?.message ?? (typeof evAny.message === "string" ? evAny.message : "unknown error");
+      const errType =
+        typeof errObj === "object" ? (errObj?.type ?? "") : "";
       setEntries((es) => [
         ...es,
         { kind: "system", id: randomId(), text: `API error: ${msg}` },
       ]);
       setShowStderr(true);
+      if (errType === "authentication_error" || isAuthErrorText(msg)) {
+        setAuthErrorSeen(true);
+      }
       return;
     }
   }
@@ -1411,6 +1448,12 @@ function App() {
 
   return (
     <div className="root">
+      {authErrorSeen && (
+        <AuthErrorModal
+          onDismiss={() => setAuthErrorSeen(false)}
+          onQuit={() => getCurrentWindow().close().catch(() => {})}
+        />
+      )}
       <Sidebar
         sessions={sessions}
         activeId={gridMode ? undefined : activeSessionId}
@@ -3284,12 +3327,24 @@ function LiveGrid({
       {panels.map((id) => {
         const info = sessions.find((s) => s.id === id);
         const isNewPanel = id in newPanelCwds;
+        // Pinned panel whose session info hasn't hydrated yet — wait
+        // instead of booting with an empty cwd (which would fail spawn
+        // with "project directory doesn't exist"). Happens on app start
+        // when gridPanels is restored from localStorage before
+        // refreshSessions finishes.
+        if (!isNewPanel && !info) {
+          return (
+            <div key={id} className="grid-panel loading-skeleton">
+              <span className="grid-panel-loading">loading session…</span>
+            </div>
+          );
+        }
         const panelCwd = isNewPanel
           ? newPanelCwds[id]
-          : info?.cwd || defaultCwd;
+          : info!.cwd || defaultCwd;
         const panelModel = isNewPanel
           ? defaultModel
-          : info?.model || defaultModel;
+          : info!.model || defaultModel;
         return (
           <LivePanel
             key={id}
@@ -3324,6 +3379,47 @@ function LiveGrid({
   );
 }
 
+
+function AuthErrorModal({
+  onDismiss,
+  onQuit,
+}: {
+  onDismiss: () => void;
+  onQuit: () => void;
+}) {
+  return (
+    <div className="auth-error-overlay" role="alertdialog" aria-modal="true">
+      <div className="auth-error-card">
+        <h2>Claude needs you to sign in again</h2>
+        <p>
+          The <code>claude</code> CLI got a <strong>401 Invalid authentication
+          credentials</strong> response. That usually means the OAuth token
+          tied to your Max subscription has expired and needs a fresh login.
+        </p>
+        <p>To fix:</p>
+        <ol>
+          <li>
+            Open a terminal and run <code>claude login</code>, then complete
+            the browser flow.
+          </li>
+          <li>
+            Quit and relaunch this app — the CLI only reads its credential
+            file at startup, so an in-flight subprocess won't pick up the
+            refresh.
+          </li>
+        </ol>
+        <div className="auth-error-actions">
+          <button type="button" className="btn btn-secondary" onClick={onDismiss}>
+            Dismiss
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onQuit}>
+            Quit app
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PermissionPromptOverlay({
   req,
