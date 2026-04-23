@@ -34,6 +34,7 @@ export function LivePanel({
   repo,
   sessionCache,
   isActive,
+  useWorktree,
   onFocus,
   onRemove,
   onRename,
@@ -51,6 +52,7 @@ export function LivePanel({
     { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
   >;
   isActive: boolean;
+  useWorktree?: boolean;
   onFocus: () => void;
   onRemove: () => void;
   onRename?: (id: string, cwd: string, title: string) => Promise<void>;
@@ -374,6 +376,7 @@ export function LivePanel({
           permissionMode,
           model: initialModel || null,
           resumeId: initialSessionId || null,
+          useWorktree: !!useWorktree,
         });
         setSessionOn(true);
       } catch (e) {

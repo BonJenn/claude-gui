@@ -64,6 +64,7 @@ async fn start_session(
     permission_mode: Option<String>,
     model: Option<String>,
     resume_id: Option<String>,
+    use_worktree: Option<bool>,
 ) -> Result<(), String> {
     let mut guard = state.sessions.lock().await;
     if let Some(mut s) = guard.remove(&panel_id) {
@@ -102,8 +103,18 @@ async fn start_session(
         cmd.arg("--model").arg(m);
     }
 
+    let is_resume = resume_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
     if let Some(rid) = resume_id.filter(|s| !s.is_empty()) {
         cmd.arg("--resume").arg(rid);
+    }
+
+    // When the caller asks for an isolated worktree, delegate the
+    // worktree creation to the claude CLI itself (it handles the
+    // `git worktree add`, places the session inside the new dir, and
+    // records the path in its own session metadata). Skipped on
+    // --resume since the worktree was already created on first spawn.
+    if use_worktree.unwrap_or(false) && !is_resume {
+        cmd.arg("--worktree");
     }
 
     // Bail early with a clear error if the cwd doesn't exist — otherwise

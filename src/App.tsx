@@ -407,6 +407,23 @@ function App() {
   // Panels that don't correspond to an existing session yet — they come
   // from the "+ new panel" button and carry a user-picked cwd until a
   // session is spawned on first message. Keyed by synthetic panel id.
+  // Parallel to newPanelCwds: whether a given new panel should spawn
+  // claude with --worktree so it gets its own isolated git working
+  // directory. Only meaningful on first spawn; claude creates the
+  // worktree itself and subsequent --resume calls just use its cwd.
+  const [newPanelWorktree, setNewPanelWorktree] = useState<
+    Record<string, boolean>
+  >(() => {
+    try {
+      const raw = localStorage.getItem("newPanelWorktree");
+      return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem("newPanelWorktree", JSON.stringify(newPanelWorktree));
+  }, [newPanelWorktree]);
   const [newPanelCwds, setNewPanelCwds] = useState<Record<string, string>>(
     () => {
       const saved = localStorage.getItem("newPanelCwds");
@@ -1207,8 +1224,21 @@ function App() {
       return;
     }
     if (!chosen) return; // user cancelled the dialog
+    // Offer worktree isolation so parallel grid panels in the same repo
+    // don't stomp on each other's git state. We only ask — claude itself
+    // decides whether the dir is actually a git repo when it spawns.
+    const useWorktree = window.confirm(
+      "Isolate this panel in a new git worktree?\n\n" +
+        "Recommended if another panel already points at this repo — " +
+        "each worktree has its own HEAD so branch switches and " +
+        "uncommitted edits don't collide.\n\n" +
+        "Pick Cancel to spawn in the directory you selected.",
+    );
     const key = `new:${randomId()}:${Date.now()}`;
     setNewPanelCwds((m) => ({ ...m, [key]: chosen! }));
+    if (useWorktree) {
+      setNewPanelWorktree((m) => ({ ...m, [key]: true }));
+    }
     // If we're at the 6-panel cap, replace the currently selected panel
     // (falling back to the last) so the new session always appears.
     if (gridPanels.length >= 6) {
@@ -1226,6 +1256,12 @@ function App() {
       // Clean up the replaced panel's cwd entry if it was a new-panel key.
       if (replacedId && replacedId.startsWith("new:")) {
         setNewPanelCwds((m) => {
+          if (!(replacedId in m)) return m;
+          const next = { ...m };
+          delete next[replacedId];
+          return next;
+        });
+        setNewPanelWorktree((m) => {
           if (!(replacedId in m)) return m;
           const next = { ...m };
           delete next[replacedId];
@@ -1521,6 +1557,12 @@ function App() {
                 delete next[targetId];
                 return next;
               });
+              setNewPanelWorktree((m) => {
+                if (!(targetId in m)) return m;
+                const next = { ...m };
+                delete next[targetId];
+                return next;
+              });
             }
             setSelectedGridPanelId(id);
           } else {
@@ -1669,6 +1711,7 @@ function App() {
             onAddPanel={addNewGridPanel}
             onRename={renameSession}
             newPanelCwds={newPanelCwds}
+            newPanelWorktree={newPanelWorktree}
             onSessionStarted={(panelId, sid) => {
               setPanelSessionIds((m) =>
                 m[panelId] === sid ? m : { ...m, [panelId]: sid },
@@ -1678,6 +1721,12 @@ function App() {
             onRemove={(id) => {
               setGridPanels((prev) => prev.filter((x) => x !== id));
               setNewPanelCwds((m) => {
+                if (!(id in m)) return m;
+                const next = { ...m };
+                delete next[id];
+                return next;
+              });
+              setNewPanelWorktree((m) => {
                 if (!(id in m)) return m;
                 const next = { ...m };
                 delete next[id];
@@ -3352,6 +3401,7 @@ function LiveGrid({
   defaultModel,
   selectedId,
   newPanelCwds,
+  newPanelWorktree,
   onAddPanel,
   onSelect,
   onRemove,
@@ -3369,6 +3419,7 @@ function LiveGrid({
   defaultModel: string;
   selectedId: string | null;
   newPanelCwds: Record<string, string>;
+  newPanelWorktree: Record<string, boolean>;
   onAddPanel: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
@@ -3493,6 +3544,7 @@ function LiveGrid({
             repo=""
             sessionCache={sessionCache}
             isActive={selectedId === id}
+            useWorktree={isNewPanel ? !!newPanelWorktree[id] : false}
             onFocus={() => onSelect(id)}
             onRemove={() => onRemove(id)}
             onRename={onRename}
