@@ -3500,6 +3500,84 @@ function LiveGrid({
     [],
   );
 
+  // Column weights — one array per column count (2 or 3), each summing
+  // arbitrarily. grid-template-columns uses `${w}fr` so the ratio is
+  // what matters, not the absolute values. Clamp at drag time to keep
+  // each column >= 15% of total.
+  const [colWeightsByCount, setColWeightsByCount] = useState<
+    Record<number, number[]>
+  >(() => {
+    try {
+      const raw = localStorage.getItem("gridColWeightsByCount");
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const out: Record<number, number[]> = {};
+        for (const [k, v] of Object.entries(parsed)) {
+          const n = parseInt(k, 10);
+          if (Array.isArray(v) && v.every((x) => typeof x === "number")) {
+            out[n] = v as number[];
+          }
+        }
+        return out;
+      }
+    } catch {}
+    return {};
+  });
+  useEffect(() => {
+    localStorage.setItem(
+      "gridColWeightsByCount",
+      JSON.stringify(colWeightsByCount),
+    );
+  }, [colWeightsByCount]);
+  const onColDividerPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>, columnCount: number, idx: number) => {
+      e.preventDefault();
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.body.dataset.resizing = "true";
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;z-index:99999;cursor:col-resize;";
+      document.body.appendChild(overlay);
+      // Snapshot the weights at drag start so the move math stays
+      // stable even if setState batching trails behind pointer events.
+      const startWeights =
+        (colWeightsByCount[columnCount] ??
+          Array.from({ length: columnCount }, () => 1)).slice();
+      const total = startWeights.reduce((a, b) => a + b, 0);
+      const pairSum = startWeights[idx] + startWeights[idx + 1];
+      const minWeight = total * 0.15;
+      const startX = e.clientX;
+      const move = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const fracDelta = (dx / rect.width) * total;
+        let newLeft = startWeights[idx] + fracDelta;
+        newLeft = Math.max(minWeight, Math.min(pairSum - minWeight, newLeft));
+        const newRight = pairSum - newLeft;
+        const next = startWeights.slice();
+        next[idx] = newLeft;
+        next[idx + 1] = newRight;
+        setColWeightsByCount((prev) => ({ ...prev, [columnCount]: next }));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        delete document.body.dataset.resizing;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    },
+    [colWeightsByCount],
+  );
+
   if (panels.length === 0) {
     return (
       <section className="grid-transcripts empty-grid">
@@ -3528,12 +3606,30 @@ function LiveGrid({
   const gridTemplateRows = showRowDivider
     ? `${topFraction}fr ${1 - topFraction}fr`
     : undefined;
+  const colWeights =
+    (columns > 1 && colWeightsByCount[columns]?.length === columns
+      ? colWeightsByCount[columns]
+      : Array.from({ length: columns }, () => 1));
+  const gridTemplateColumns =
+    columns === 1
+      ? "minmax(0, 1fr)"
+      : colWeights.map((w) => `minmax(0, ${w}fr)`).join(" ");
+  // Compute % positions for the N-1 vertical dividers between columns.
+  const colDividerLefts: number[] = [];
+  if (columns > 1) {
+    const totalW = colWeights.reduce((a, b) => a + b, 0);
+    let cum = 0;
+    for (let i = 0; i < colWeights.length - 1; i++) {
+      cum += colWeights[i];
+      colDividerLefts.push((cum / totalW) * 100);
+    }
+  }
   return (
     <section
       ref={containerRef}
       className="grid-transcripts live"
       style={{
-        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+        gridTemplateColumns,
         gridTemplateRows,
       }}
     >
@@ -3600,6 +3696,18 @@ function LiveGrid({
           title="drag to resize rows"
         />
       )}
+      {colDividerLefts.map((leftPct, i) => (
+        <div
+          key={`col-divider-${i}`}
+          className="grid-col-divider"
+          style={{ left: `${leftPct.toFixed(2)}%` }}
+          onPointerDown={(e) => onColDividerPointerDown(e, columns, i)}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="resize column widths"
+          title="drag to resize columns"
+        />
+      ))}
     </section>
   );
 }

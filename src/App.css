@@ -835,6 +835,35 @@ body[data-resizing="true"] .grid-row-divider::before {
   width: 72px;
 }
 
+.grid-col-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  transform: translateX(-50%);
+  cursor: col-resize;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.grid-col-divider::before {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 48px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.12s, height 0.12s;
+}
+
+.grid-col-divider:hover::before,
+body[data-resizing="true"] .grid-col-divider::before {
+  background: var(--accent);
+  height: 72px;
+}
+
 .grid-panel.loading-skeleton {
   display: flex;
   align-items: center;
