@@ -112,9 +112,14 @@ async fn start_session(
     // worktree creation to the claude CLI itself (it handles the
     // `git worktree add`, places the session inside the new dir, and
     // records the path in its own session metadata). Skipped on
-    // --resume since the worktree was already created on first spawn.
+    // --resume since the worktree was already created on first spawn,
+    // and skipped silently if the cwd isn't a git repo (claude would
+    // otherwise bail out and kill the session with a broken pipe).
     if use_worktree.unwrap_or(false) && !is_resume {
-        cmd.arg("--worktree");
+        let dot_git = std::path::Path::new(&cwd).join(".git");
+        if dot_git.exists() {
+            cmd.arg("--worktree");
+        }
     }
 
     // Bail early with a clear error if the cwd doesn't exist — otherwise

@@ -348,6 +348,15 @@ function App() {
   const [pendingDenials, setPendingDenials] = useState<
     Array<{ tool_name: string; tool_input?: unknown }> | null
   >(null);
+  // Modal state for the worktree-opt-in prompt. We used to call
+  // window.confirm, but Tauri v2 webviews route it through the
+  // dialog plugin and the capability blocks it — it was silently
+  // returning truthy, enabling --worktree on non-git dirs and killing
+  // the subprocess. A custom modal is both more reliable and nicer.
+  const [worktreePrompt, setWorktreePrompt] = useState<{
+    cwd: string;
+    resolve: (choice: boolean | null) => void;
+  } | null>(null);
   // Remember the most recent user message so "allow and retry" can
   // replay it after upgrading permission mode.
   const lastUserMessageRef = useRef<string>("");
@@ -1271,16 +1280,25 @@ function App() {
       return;
     }
     if (!chosen) return; // user cancelled the dialog
-    // Offer worktree isolation so parallel grid panels in the same repo
-    // don't stomp on each other's git state. We only ask — claude itself
-    // decides whether the dir is actually a git repo when it spawns.
-    const useWorktree = window.confirm(
-      "Isolate this panel in a new git worktree?\n\n" +
-        "Recommended if another panel already points at this repo — " +
-        "each worktree has its own HEAD so branch switches and " +
-        "uncommitted edits don't collide.\n\n" +
-        "Pick Cancel to spawn in the directory you selected.",
-    );
+    // Only offer the worktree opt-in when the picked dir is actually a
+    // git repo. Otherwise skip the question entirely — claude would
+    // refuse --worktree on a non-repo and the spawn would die with a
+    // broken pipe.
+    let isRepo = false;
+    try {
+      const info = await invoke<BranchInfo>("list_branches", { cwd: chosen });
+      isRepo = !!info?.is_repo;
+    } catch {
+      isRepo = false;
+    }
+    let useWorktree = false;
+    if (isRepo) {
+      const choice = await new Promise<boolean | null>((resolve) => {
+        setWorktreePrompt({ cwd: chosen!, resolve });
+      });
+      if (choice === null) return; // user cancelled the modal
+      useWorktree = choice;
+    }
     const key = `new:${randomId()}:${Date.now()}`;
     setNewPanelCwds((m) => ({ ...m, [key]: chosen! }));
     if (useWorktree) {
@@ -1605,6 +1623,23 @@ function App() {
         <AuthErrorModal
           onDismiss={() => setAuthErrorSeen(false)}
           onQuit={() => getCurrentWindow().close().catch(() => {})}
+        />
+      )}
+      {worktreePrompt && (
+        <WorktreePromptModal
+          cwd={worktreePrompt.cwd}
+          onYes={() => {
+            worktreePrompt.resolve(true);
+            setWorktreePrompt(null);
+          }}
+          onNo={() => {
+            worktreePrompt.resolve(false);
+            setWorktreePrompt(null);
+          }}
+          onCancel={() => {
+            worktreePrompt.resolve(null);
+            setWorktreePrompt(null);
+          }}
         />
       )}
       <Sidebar
@@ -3839,6 +3874,53 @@ function LiveGrid({
   );
 }
 
+
+function WorktreePromptModal({
+  cwd,
+  onYes,
+  onNo,
+  onCancel,
+}: {
+  cwd: string;
+  onYes: () => void;
+  onNo: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="auth-error-overlay"
+      role="alertdialog"
+      aria-modal="true"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div className="auth-error-card">
+        <h2>Isolate this panel in a git worktree?</h2>
+        <p>
+          <code>{cwd}</code> is a git repository. If another grid panel is
+          already pointing at it, a worktree gives this panel its own HEAD,
+          index, and working tree — so branch switches and uncommitted
+          edits won't collide.
+        </p>
+        <p>
+          Pick <strong>No</strong> to just spawn in the directory as-is.
+        </p>
+        <div className="auth-error-actions">
+          <button type="button" className="btn btn-secondary" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onNo}>
+            No, use the dir
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onYes}>
+            Yes, new worktree
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AuthErrorModal({
   onDismiss,
