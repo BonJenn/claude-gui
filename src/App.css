@@ -1110,6 +1110,21 @@ input:disabled, select:disabled, textarea:disabled {
 
 .transcript-row {
   padding-bottom: 14px;
+  /* Skip layout + paint of rows that aren't near the viewport. For long
+     transcripts this is the difference between a 2.5s reconcile and a
+     ~100ms one — the browser only materializes what the user can see. */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 240px;
+}
+
+/* Kept-alive transcripts: rendered but hidden. Keeping the DOM around
+   means switching back is a visibility toggle, not a teardown + rebuild
+   of thousands of syntax-highlighted spans. */
+.transcript-slot.active {
+  display: contents;
+}
+.transcript-slot.kept {
+  display: none;
 }
 
 .transcript-row:last-child {
