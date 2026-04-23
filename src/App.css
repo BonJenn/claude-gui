@@ -802,6 +802,39 @@ input:disabled, select:disabled, textarea:disabled {
   min-height: 0;
 }
 
+.grid-transcripts.live {
+  position: relative;
+}
+
+.grid-row-divider {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 10px;
+  transform: translateY(-50%);
+  cursor: row-resize;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.grid-row-divider::before {
+  content: "";
+  display: block;
+  width: 48px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.12s, width 0.12s;
+}
+
+.grid-row-divider:hover::before,
+body[data-resizing="true"] .grid-row-divider::before {
+  background: var(--accent);
+  width: 72px;
+}
+
 .grid-panel.loading-skeleton {
   display: flex;
   align-items: center;
