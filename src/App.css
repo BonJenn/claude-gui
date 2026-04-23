@@ -1272,6 +1272,25 @@ body[data-resizing="true"] .grid-col-divider::before {
   contain-intrinsic-size: 0 240px;
 }
 
+.transcript-load-older {
+  align-self: center;
+  margin: 6px auto 14px;
+  padding: 5px 12px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.transcript-load-older:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
 /* Kept-alive transcripts: rendered but hidden. Keeping the DOM around
    means switching back is a visibility toggle, not a teardown + rebuild
    of thousands of syntax-highlighted spans. */

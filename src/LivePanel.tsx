@@ -31,6 +31,7 @@ export function LivePanel({
   initialCwd,
   initialModel,
   initialTitle,
+  initialMtime,
   permissionMode,
   repo,
   sessionCache,
@@ -40,12 +41,19 @@ export function LivePanel({
   onRemove,
   onRename,
   onSessionStarted,
+  onExpand,
 }: {
   panelId: string;
   initialSessionId?: string;
   initialCwd: string;
   initialModel: string;
   initialTitle?: string;
+  /** File mtime of the session JSONL at the time we started tracking
+   *  it. Passed so the lazy history loader can tag sessionCache with
+   *  the same mtime single-view resumeSession uses for its cache-hit
+   *  check — otherwise an expand-from-grid always triggers a slow
+   *  JSONL reload. */
+  initialMtime?: number;
   permissionMode: string;
   repo: string;
   sessionCache: Map<
@@ -58,6 +66,9 @@ export function LivePanel({
   onRemove: () => void;
   onRename?: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted?: (panelId: string, sessionId: string) => void;
+  /** Double-click handler — expand this panel into the main single-view
+   *  mode. Only fires once the panel has a real session id. */
+  onExpand?: (sessionId: string, cwd: string) => void;
 }) {
   const [entries, setEntries] = useState<Entry[]>(() => {
     if (initialSessionId) {
@@ -190,7 +201,7 @@ export function LivePanel({
         sessionCache.set(initialSessionId, {
           entries: history,
           toolUseMap: loadedMap,
-          mtime_ms: 0,
+          mtime_ms: initialMtime ?? 0,
         });
       } catch {
         // Best-effort — if load fails, the panel stays empty until the
@@ -566,6 +577,32 @@ export function LivePanel({
         attention ? `attention-${attention}` : ""
       }`}
       onMouseDown={onFocus}
+      onDoubleClick={(e) => {
+        // Leave the composer and interactive controls alone so their
+        // own double-click semantics (word-select in the textarea,
+        // link open, button press) still work.
+        const tgt = e.target as HTMLElement | null;
+        if (
+          tgt &&
+          tgt.closest(
+            "textarea, input, button, a, .editable-title-input, .grid-panel-composer",
+          )
+        )
+          return;
+        if (onExpand && sessionId) {
+          // Flush the panel's current live entries into the shared
+          // session cache so the main single-view opens with the most
+          // up-to-date transcript, not just whatever the lazy loader
+          // saved earlier.
+          sessionCache.set(sessionId, {
+            entries: entries.slice(),
+            toolUseMap: new Map(toolUseMap),
+            mtime_ms: initialMtime ?? Date.now(),
+          });
+          onExpand(sessionId, initialCwd);
+        }
+      }}
+      title="double-click to expand into single view"
     >
       <header className="grid-panel-head">
         {onRename && sessionId ? (
