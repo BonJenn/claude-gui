@@ -62,6 +62,8 @@ export function LivePanel({
   const [busy, setBusy] = useState(false);
   const [sessionOn, setSessionOn] = useState(false);
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
+  const [pendingPermission, setPendingPermission] =
+    useState<PermissionRequest | null>(null);
   const streamingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
@@ -84,6 +86,21 @@ export function LivePanel({
 
   const handleEvent = useCallback(
     (ev: StreamEvent) => {
+      // Claude asks the frontend for permission via control_request /
+      // subtype=can_use_tool. We surface it to the user and reply with
+      // control_response via send_raw.
+      const any = ev as Record<string, unknown>;
+      if (any.type === "control_request") {
+        const req = any.request as Record<string, unknown> | undefined;
+        if (req && req.subtype === "can_use_tool") {
+          setPendingPermission({
+            requestId: String(any.request_id ?? ""),
+            toolName: String(req.tool_name ?? "unknown"),
+            input: req.input,
+          });
+        }
+        return;
+      }
       if (ev.type === "system" && ev.subtype === "init") {
         if (ev.session_id) {
           setSessionId((prev) => {
@@ -326,6 +343,24 @@ export function LivePanel({
           </div>
         ))}
         {busy && <TypingIndicator />}
+        {pendingPermission && (
+          <PermissionPrompt
+            req={pendingPermission}
+            onAllow={() => {
+              respondPermission(panelId, pendingPermission, true);
+              setPendingPermission(null);
+            }}
+            onDeny={() => {
+              respondPermission(panelId, pendingPermission, false);
+              setPendingPermission(null);
+            }}
+            onAllowAndBypass={() => {
+              respondPermission(panelId, pendingPermission, true);
+              setPermissionModeOnPanel(panelId, "bypassPermissions");
+              setPendingPermission(null);
+            }}
+          />
+        )}
       </div>
       <footer className="grid-panel-composer">
         <textarea
@@ -500,4 +535,94 @@ function handlePartial(
     streamingIdRef.current = null;
     return;
   }
+}
+
+export type PermissionRequest = {
+  requestId: string;
+  toolName: string;
+  input: unknown;
+};
+
+function randomRequestId(): string {
+  return `req_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+}
+
+export async function respondPermission(
+  panelId: string,
+  req: PermissionRequest,
+  allow: boolean,
+) {
+  const body = {
+    type: "control_response",
+    response: {
+      request_id: req.requestId,
+      subtype: "success",
+      response: allow
+        ? { behavior: "allow", updated_input: req.input }
+        : { behavior: "deny", message: "user denied" },
+    },
+  };
+  try {
+    await invoke("send_raw", {
+      panelId,
+      line: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error("permission respond failed", err);
+  }
+}
+
+export async function setPermissionModeOnPanel(panelId: string, mode: string) {
+  const body = {
+    type: "control_request",
+    request_id: randomRequestId(),
+    request: { subtype: "set_permission_mode", mode },
+  };
+  try {
+    await invoke("send_raw", {
+      panelId,
+      line: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error("set_permission_mode failed", err);
+  }
+}
+
+function PermissionPrompt({
+  req,
+  onAllow,
+  onDeny,
+  onAllowAndBypass,
+}: {
+  req: PermissionRequest;
+  onAllow: () => void;
+  onDeny: () => void;
+  onAllowAndBypass: () => void;
+}) {
+  const inputPreview = (() => {
+    try {
+      return JSON.stringify(req.input, null, 2);
+    } catch {
+      return String(req.input);
+    }
+  })();
+  return (
+    <div className="permission-prompt">
+      <div className="permission-prompt-title">
+        claude wants to use <span className="permission-tool">{req.toolName}</span>
+      </div>
+      <pre className="permission-prompt-input">{inputPreview}</pre>
+      <div className="permission-prompt-actions">
+        <button className="btn btn-secondary" onClick={onDeny}>
+          deny
+        </button>
+        <button className="btn btn-secondary" onClick={onAllowAndBypass}>
+          allow + bypass rest of session
+        </button>
+        <button className="btn btn-send" onClick={onAllow}>
+          allow
+        </button>
+      </div>
+    </div>
+  );
 }
