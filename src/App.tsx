@@ -1375,7 +1375,14 @@ function App() {
     const mtime = info?.mtime_ms ?? 0;
 
     const cached = sessionCacheRef.current.get(sessionId);
-    const cacheHit = cached && cached.mtime_ms === mtime && mtime > 0;
+    // Any cache with entries is good enough for instant display — the
+    // prewarm loop keeps entries reasonably fresh on mtime change, and
+    // a stale cache just means a turn or two is missing until the next
+    // prewarm pass. Previously we required `cached.mtime_ms === mtime`,
+    // which rejected caches populated by LivePanel's lazy loader (which
+    // had no disk mtime) and caused "expand from grid" to always take
+    // the slow path.
+    const cacheHit = !!cached && cached.entries.length > 0;
 
     // ---------- Single synchronous batch: swap entire view in one render ----------
     // Everything below runs before any await so React 18 batches them into a
@@ -1409,6 +1416,10 @@ function App() {
       const existingSlot = allTranscripts.get(sessionId);
       const alreadyMounted = !!existingSlot && existingSlot.length > 0;
       if (!alreadyMounted) {
+        // PlainTranscript only renders the tail window by default (see
+        // TRANSCRIPT_WINDOW), so mounting a full cached-entry array is
+        // cheap regardless of conversation length — no progressive
+        // mount needed.
         setEntries([
           ...cached!.entries,
           { kind: "system", id: randomId(), text: "— resumed —" },
@@ -1850,6 +1861,12 @@ function App() {
                 m[panelId] === sid ? m : { ...m, [panelId]: sid },
               );
               refreshSessions();
+            }}
+            onExpand={(sid, panelCwd) => {
+              // Double-click on a grid tile: leave grid mode and load
+              // that session in the single-view transcript.
+              setGridMode(false);
+              resumeSession(sid, panelCwd);
             }}
             onRemove={(id) => {
               setGridPanels((prev) => prev.filter((x) => x !== id));
@@ -3595,6 +3612,7 @@ function LiveGrid({
   onRemove,
   onRename,
   onSessionStarted,
+  onExpand,
 }: {
   panels: string[];
   sessions: SessionInfo[];
@@ -3613,6 +3631,7 @@ function LiveGrid({
   onRemove: (id: string) => void;
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted: (panelId: string, sessionId: string) => void;
+  onExpand: (sessionId: string, cwd: string) => void;
 }) {
   // Draggable divider between the two rows lets the user rebalance tile
   // heights. Stored as a fraction of the grid's height taken by the top
@@ -3824,6 +3843,7 @@ function LiveGrid({
             initialCwd={panelCwd}
             initialModel={panelModel}
             initialTitle={isNewPanel ? "new session" : info?.title}
+            initialMtime={isNewPanel ? 0 : info?.mtime_ms ?? 0}
             permissionMode={info?.permission_mode || permissionMode}
             repo=""
             sessionCache={sessionCache}
@@ -3833,6 +3853,7 @@ function LiveGrid({
             onRemove={() => onRemove(id)}
             onRename={onRename}
             onSessionStarted={onSessionStarted}
+            onExpand={onExpand}
           />
         );
       })}
@@ -4069,6 +4090,12 @@ function PermissionPromptOverlay({
   );
 }
 
+// Initial window of entries to render in a PlainTranscript — anything
+// beyond this is hidden behind a "show older" button so first paint
+// stays fast regardless of conversation length.
+const TRANSCRIPT_WINDOW = 40;
+const TRANSCRIPT_WINDOW_STEP = 40;
+
 function PlainTranscript({
   entries,
   busy,
@@ -4080,6 +4107,14 @@ function PlainTranscript({
   scrollRef: React.RefObject<HTMLDivElement | null>;
   onAtBottomChange: (atBottom: boolean) => void;
 }) {
+  const [windowSize, setWindowSize] = useState(TRANSCRIPT_WINDOW);
+  // Stream new turns should auto-extend the window so live replies
+  // don't get clipped by the "show older" affordance once the user
+  // has started expanding it.
+  useEffect(() => {
+    setWindowSize((w) => (entries.length <= w ? w : w));
+  }, [entries.length]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -4092,9 +4127,37 @@ function PlainTranscript({
     return () => el.removeEventListener("scroll", onScroll);
   }, [onAtBottomChange, scrollRef]);
 
+  const total = entries.length;
+  const visible =
+    total > windowSize ? entries.slice(total - windowSize) : entries;
+  const hiddenCount = total - visible.length;
+
+  function loadOlder() {
+    const el = scrollRef.current;
+    // Preserve the user's visual position after prepending: remember
+    // how far above the bottom we were, then restore that distance.
+    const prevFromBottom = el
+      ? el.scrollHeight - el.clientHeight - el.scrollTop
+      : 0;
+    setWindowSize((w) => w + TRANSCRIPT_WINDOW_STEP);
+    requestAnimationFrame(() => {
+      if (!el) return;
+      el.scrollTop = el.scrollHeight - el.clientHeight - prevFromBottom;
+    });
+  }
+
   return (
     <div className="transcript plain" ref={scrollRef}>
-      {entries.map((entry) => (
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          className="transcript-load-older"
+          onClick={loadOlder}
+        >
+          show older ({hiddenCount} earlier {hiddenCount === 1 ? "message" : "messages"})
+        </button>
+      )}
+      {visible.map((entry) => (
         <div key={entry.id} className="transcript-row">
           <EntryView entry={entry} />
         </div>
