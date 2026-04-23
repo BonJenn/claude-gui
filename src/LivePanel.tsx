@@ -73,9 +73,27 @@ export function LivePanel({
   }, [initialTitle]);
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
+  // `claude -p` doesn't delegate permissions via control_request — it
+  // auto-denies and reports denials in the result event. We surface
+  // them so grid panels can retry-with-bypass, same as the main session.
+  const [pendingDenials, setPendingDenials] = useState<
+    Array<{ tool_name: string; tool_input?: unknown }> | null
+  >(null);
+  // Remember the last user message so "allow and retry" can replay it
+  // after the subprocess is restarted in bypassPermissions.
+  const lastUserMessageRef = useRef<string>("");
+  // Panel's current permission mode — starts at the prop, can change
+  // if we restart the subprocess for "allow and retry".
+  const currentModeRef = useRef(permissionMode);
   const streamingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
+  // Tracks whether we've already notified the host that this panel's
+  // subprocess reported its session id. Keeping this in a ref lets us
+  // call onSessionStarted outside any setState updater — calling it from
+  // inside a reducer triggers React's "setState-in-render" warning
+  // because parent state updates would run during our render phase.
+  const notifiedStartRef = useRef(false);
 
   const toolUseMap = useMemo(() => {
     if (initialSessionId) {
@@ -159,13 +177,11 @@ export function LivePanel({
       }
       if (ev.type === "system" && ev.subtype === "init") {
         if (ev.session_id) {
-          setSessionId((prev) => {
-            // Notify the host exactly once per panel when the subprocess
-            // first reports its session id — used to refresh the sidebar
-            // so a brand-new session appears at the top immediately.
-            if (!prev && onSessionStarted) onSessionStarted(panelId, ev.session_id!);
-            return ev.session_id;
-          });
+          setSessionId(ev.session_id);
+          if (!notifiedStartRef.current && onSessionStarted) {
+            notifiedStartRef.current = true;
+            onSessionStarted(panelId, ev.session_id);
+          }
         }
         return;
       }
@@ -296,10 +312,26 @@ export function LivePanel({
             isError: ev.is_error,
           },
         ]);
+        const rawDenials = (ev as { permission_denials?: unknown })
+          .permission_denials;
+        if (Array.isArray(rawDenials) && rawDenials.length > 0) {
+          const parsed = rawDenials
+            .filter(
+              (d): d is { tool_name: string; tool_input?: unknown } =>
+                typeof d === "object" &&
+                d !== null &&
+                typeof (d as { tool_name?: unknown }).tool_name === "string",
+            )
+            .map((d) => ({
+              tool_name: d.tool_name,
+              tool_input: d.tool_input,
+            }));
+          if (parsed.length > 0) setPendingDenials(parsed);
+        }
         return;
       }
     },
-    [toolUseMap, repo],
+    [toolUseMap, repo, panelId],
   );
 
   // Boot the subprocess exactly once on mount.
@@ -387,6 +419,7 @@ export function LivePanel({
     if (!text || busy) return;
     setInput("");
     setEntries((es) => [...es, { kind: "user", id: randomId(), text }]);
+    lastUserMessageRef.current = text;
     setBusy(true);
     try {
       await invoke("send_message", { panelId, text });
@@ -398,6 +431,37 @@ export function LivePanel({
       ]);
     }
   }, [input, busy, panelId]);
+
+  // Restart this panel's subprocess in bypassPermissions mode and replay
+  // the last user message. Used by the denial overlay's "allow & retry".
+  const allowAndRetry = useCallback(async () => {
+    const resendText = lastUserMessageRef.current;
+    setPendingDenials(null);
+    currentModeRef.current = "bypassPermissions";
+    try {
+      await invoke("start_session", {
+        panelId,
+        cwd: initialCwd,
+        permissionMode: "bypassPermissions",
+        model: initialModel || null,
+        resumeId: sessionId || initialSessionId || null,
+      });
+      setSessionOn(true);
+      if (resendText) {
+        setEntries((es) => [
+          ...es,
+          { kind: "user", id: randomId(), text: resendText },
+        ]);
+        setBusy(true);
+        await invoke("send_message", { panelId, text: resendText });
+      }
+    } catch (e) {
+      setEntries((es) => [
+        ...es,
+        { kind: "system", id: randomId(), text: `retry failed: ${e}` },
+      ]);
+    }
+  }, [panelId, initialCwd, initialModel, sessionId, initialSessionId]);
 
   const interrupt = useCallback(() => {
     invoke("interrupt_session", { panelId }).catch((err) =>
@@ -467,6 +531,52 @@ export function LivePanel({
               setPendingPermission(null);
             }}
           />
+        )}
+        {pendingDenials && (
+          <div className="permission-prompt">
+            <div className="permission-prompt-title">
+              claude wanted to use{" "}
+              {pendingDenials.length === 1 ? (
+                <span className="permission-tool">
+                  {pendingDenials[0].tool_name}
+                </span>
+              ) : (
+                <span className="permission-tool">
+                  {pendingDenials.length} tools
+                </span>
+              )}{" "}
+              but the current permission mode blocked it.
+            </div>
+            {pendingDenials.slice(0, 2).map((d, i) => {
+              const inputStr = (() => {
+                if (d.tool_input == null) return "";
+                try {
+                  return typeof d.tool_input === "string"
+                    ? d.tool_input
+                    : JSON.stringify(d.tool_input, null, 2);
+                } catch {
+                  return String(d.tool_input);
+                }
+              })();
+              return (
+                <pre key={i} className="permission-prompt-input">
+                  <strong>{d.tool_name}</strong>
+                  {inputStr ? `\n${inputStr.slice(0, 400)}` : ""}
+                </pre>
+              );
+            })}
+            <div className="permission-prompt-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() => setPendingDenials(null)}
+              >
+                Dismiss
+              </button>
+              <button className="btn btn-primary" onClick={allowAndRetry}>
+                Allow all tools &amp; retry
+              </button>
+            </div>
+          </div>
         )}
       </div>
       <footer className="grid-panel-composer">
