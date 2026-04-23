@@ -122,6 +122,7 @@ type SessionInfo = {
   total_cost_usd: number;
   output_tokens: number;
   model: string;
+  permission_mode: string;
 };
 
 type BranchInfo = {
@@ -609,6 +610,26 @@ function App() {
       setSessionsLoading(false);
     }
   }, []);
+
+  const renameSession = useCallback(
+    async (id: string, sessionCwd: string, title: string) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      try {
+        await invoke("set_session_title", {
+          sessionId: id,
+          cwd: sessionCwd,
+          title: trimmed,
+        });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s)),
+        );
+      } catch (e) {
+        console.error("set_session_title failed", e);
+      }
+    },
+    [],
+  );
 
   const refreshBranches = useCallback(async (targetCwd: string) => {
     if (!targetCwd) {
@@ -1435,6 +1456,7 @@ function App() {
             resumeSession(id, cwd);
           }
         }}
+        onRename={renameSession}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
         cwd={cwd}
@@ -1574,6 +1596,7 @@ function App() {
             selectedId={selectedGridPanelId}
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
+            onRename={renameSession}
             newPanelCwds={newPanelCwds}
             onSessionStarted={(panelId, sid) => {
               setPanelSessionIds((m) =>
@@ -2144,6 +2167,7 @@ function Sidebar({
   loading,
   resumingId,
   onResume,
+  onRename,
   onNew,
   onRefresh,
   cwd,
@@ -2161,6 +2185,7 @@ function Sidebar({
   loading: boolean;
   resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
+  onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onNew: () => void;
   onRefresh: () => void;
   cwd: string;
@@ -2333,6 +2358,7 @@ function Sidebar({
                       activeId,
                       resumingId,
                       onResume,
+                      onRename,
                       itemRefs,
                       grouped: true,
                     }),
@@ -2345,6 +2371,7 @@ function Sidebar({
                 activeId,
                 resumingId,
                 onResume,
+                onRename,
                 itemRefs,
                 grouped: false,
               }),
@@ -2354,12 +2381,100 @@ function Sidebar({
   );
 }
 
+// Inline-editable text. Click to edit; Enter or blur saves, Esc cancels.
+// Used for conversation titles in both the sidebar and grid panel header.
+export function EditableTitle({
+  value,
+  onSave,
+  className,
+  placeholder,
+  title,
+}: {
+  value: string;
+  onSave: (next: string) => void | Promise<void>;
+  className?: string;
+  placeholder?: string;
+  title?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  if (editing) {
+    const commit = async () => {
+      const next = draft.trim();
+      setEditing(false);
+      if (next && next !== value) {
+        await onSave(next);
+      } else {
+        setDraft(value);
+      }
+    };
+    return (
+      <input
+        ref={inputRef}
+        className={`editable-title-input ${className ?? ""}`}
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setDraft(value);
+            setEditing(false);
+          }
+        }}
+        onBlur={() => void commit()}
+      />
+    );
+  }
+  return (
+    <span
+      className={`editable-title ${className ?? ""}`}
+      title={title}
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        e.stopPropagation();
+        setEditing(true);
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          setEditing(true);
+        }
+      }}
+    >
+      {value || placeholder || ""}
+    </span>
+  );
+}
+
 function renderSessionItem(
   s: SessionInfo,
   ctx: {
     activeId?: string;
     resumingId: string | null;
     onResume: (id: string, cwd: string) => void;
+    onRename: (id: string, cwd: string, title: string) => Promise<void>;
     itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
     grouped: boolean;
   },
@@ -2393,7 +2508,12 @@ function renderSessionItem(
       title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
     >
       {isLoading && <span className="session-loading-bar" />}
-      <span className="session-title">{s.title || "(untitled)"}</span>
+      <EditableTitle
+        className="session-title"
+        value={s.title || ""}
+        placeholder="(untitled)"
+        onSave={(next) => ctx.onRename(s.id, s.cwd, next)}
+      />
       {!ctx.grouped && (
         <span className="session-project">{basename(s.cwd) || "unknown"}</span>
       )}
@@ -3057,9 +3177,9 @@ function ToolResultView({
       <div className="tool-result quiet">
         <span className="tool-result-check">✓</span>
         <span className="tool-result-label">{name}</span>
-        {input.file_path && (
+        {input.file_path ? (
           <span className="tool-result-path">{String(input.file_path)}</span>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -3113,6 +3233,7 @@ function LiveGrid({
   onAddPanel,
   onSelect,
   onRemove,
+  onRename,
   onSessionStarted,
 }: {
   panels: string[];
@@ -3129,6 +3250,7 @@ function LiveGrid({
   onAddPanel: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
+  onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted: (panelId: string, sessionId: string) => void;
 }) {
   if (panels.length === 0) {
@@ -3182,6 +3304,7 @@ function LiveGrid({
             isActive={selectedId === id}
             onFocus={() => onSelect(id)}
             onRemove={() => onRemove(id)}
+            onRename={onRename}
             onSessionStarted={onSessionStarted}
           />
         );
@@ -3201,92 +3324,6 @@ function LiveGrid({
   );
 }
 
-// Grid overview of up to 6 cached session transcripts. Each panel shows a
-// lightweight preview (last ~40 entries from cache) plus a click-to-activate
-// button so the user can quickly bring one to the front.
-function GridTranscripts({
-  panels,
-  sessions,
-  cache,
-  activeId,
-  onActivate,
-  onRemove,
-}: {
-  panels: string[];
-  sessions: SessionInfo[];
-  cache: Map<
-    string,
-    { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
-  >;
-  activeId?: string;
-  onActivate: (id: string, cwd: string) => void;
-  onRemove: (id: string) => void;
-}) {
-  const panelCount = Math.max(1, Math.min(6, panels.length));
-  const columns = panelCount <= 1 ? 1 : panelCount <= 4 ? 2 : 3;
-  return (
-    <section
-      className="grid-transcripts"
-      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
-    >
-      {panels.map((id) => {
-        const info = sessions.find((s) => s.id === id);
-        const cached = cache.get(id);
-        const entries = cached?.entries ?? [];
-        const tail = entries.slice(-40);
-        const title = info?.title || "(untitled)";
-        const project = info ? basename(info.cwd) || "unknown" : "";
-        const isActive = activeId === id;
-        return (
-          <div
-            key={id}
-            className={`grid-panel ${isActive ? "active" : ""}`}
-          >
-            <header className="grid-panel-head">
-              <div className="grid-panel-title" title={title}>
-                {title}
-              </div>
-              <div className="grid-panel-meta">
-                <span className="grid-panel-project">{project}</span>
-                <button
-                  type="button"
-                  className="grid-panel-activate"
-                  onClick={() => info && onActivate(info.id, info.cwd)}
-                  disabled={!info || isActive}
-                  title={isActive ? "active" : "open as the active session"}
-                >
-                  {isActive ? "● active" : "open"}
-                </button>
-                <button
-                  type="button"
-                  className="grid-panel-close"
-                  onClick={() => onRemove(id)}
-                  title="remove from grid"
-                  aria-label="remove"
-                >
-                  ×
-                </button>
-              </div>
-            </header>
-            <div className="grid-panel-body">
-              {!cached ? (
-                <div className="grid-panel-empty">still caching…</div>
-              ) : tail.length === 0 ? (
-                <div className="grid-panel-empty">no messages yet</div>
-              ) : (
-                tail.map((e) => (
-                  <div key={e.id} className="transcript-row">
-                    <EntryView entry={e} />
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </section>
-  );
-}
 
 function PermissionPromptOverlay({
   req,
@@ -3338,7 +3375,7 @@ function PlainTranscript({
 }: {
   entries: Entry[];
   busy: boolean;
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
   onAtBottomChange: (atBottom: boolean) => void;
 }) {
   useEffect(() => {
