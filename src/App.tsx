@@ -298,7 +298,6 @@ function App() {
     cwd?: string;
     tools?: string[];
   } | null>(null);
-  const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<{ id: string; path: string }[]>(
     [],
@@ -313,7 +312,46 @@ function App() {
   const [hasNewBelow, setHasNewBelow] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [activeSessionId, setActiveSessionId] = useState<string | undefined>();
+  const [activeSessionId, _setActiveSessionIdState] =
+    useState<string | undefined>();
+  // Ref mirror of activeSessionId so setEntries (called from event
+  // listener closures that captured an older id) routes the update
+  // to the right transcript slot before React commits.
+  const activeSessionIdRef = useRef<string | undefined>(undefined);
+  const setActiveSessionId = useCallback((id: string | undefined) => {
+    activeSessionIdRef.current = id;
+    _setActiveSessionIdState(id);
+  }, []);
+  // Keep-alive map of recent sessions' transcripts. Holds the ACTIVE
+  // session's live entries as well as a handful of recent inactive ones
+  // so switching back to them is instant — no DOM teardown cost. Capped
+  // at MAX_KEPT; oldest inactive gets evicted when exceeded.
+  const MAX_KEPT = 4;
+  const NEW_SESSION_KEY = "__new__";
+  const [allTranscripts, setAllTranscripts] = useState<Map<string, Entry[]>>(
+    () => new Map([[NEW_SESSION_KEY, []]]),
+  );
+  const entries = useMemo(
+    () => allTranscripts.get(activeSessionId ?? NEW_SESSION_KEY) ?? [],
+    [allTranscripts, activeSessionId],
+  );
+  const setEntries = useCallback(
+    (update: Entry[] | ((prev: Entry[]) => Entry[])) => {
+      setAllTranscripts((prev) => {
+        const id = activeSessionIdRef.current ?? NEW_SESSION_KEY;
+        const current = prev.get(id) ?? [];
+        const newVal =
+          typeof update === "function"
+            ? (update as (p: Entry[]) => Entry[])(current)
+            : update;
+        if (newVal === current) return prev;
+        const next = new Map(prev);
+        next.set(id, newVal);
+        return next;
+      });
+    },
+    [],
+  );
   const [projectFilter, setProjectFilter] = useState<string>("");
   const [sessionSearch, setSessionSearch] = useState<string>("");
   const [groupByProject, setGroupByProject] = useState<boolean>(() => {
@@ -356,6 +394,34 @@ function App() {
   const [selectedGridPanelId, setSelectedGridPanelId] = useState<string | null>(
     null,
   );
+  // Defer eviction of old kept-alive transcripts to idle time so the
+  // click that pushed the map over the cap doesn't pay the teardown
+  // cost of the slot we're evicting.
+  useEffect(() => {
+    if (allTranscripts.size <= MAX_KEPT) return;
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    const schedule = w.requestIdleCallback
+      ? (cb: () => void) => w.requestIdleCallback!(cb, { timeout: 2000 })
+      : (cb: () => void) => window.setTimeout(cb, 200);
+    const cancel = w.cancelIdleCallback ?? window.clearTimeout;
+    const handle = schedule(() => {
+      setAllTranscripts((prev) => {
+        if (prev.size <= MAX_KEPT) return prev;
+        const id = activeSessionIdRef.current ?? NEW_SESSION_KEY;
+        const next = new Map(prev);
+        for (const k of Array.from(next.keys())) {
+          if (next.size <= MAX_KEPT) break;
+          if (k === id || k === NEW_SESSION_KEY) continue;
+          next.delete(k);
+        }
+        return next;
+      });
+    });
+    return () => cancel(handle as number);
+  }, [allTranscripts]);
   // Maps a grid panel key (which may be a "new:..." placeholder) to the
   // real session id reported by the subprocess's first init event. Without
   // this, the topbar sync below can't find the session info for freshly
@@ -481,6 +547,10 @@ function App() {
   const previewResize = useResizable(480, 320, 900, "left", "previewWidth");
 
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
+  // Stub ref + callback passed to inactive kept-alive transcripts so they
+  // don't touch the real scroll-tracking state meant for the active one.
+  const noopScrollRef = useRef<HTMLDivElement>(null);
+  const noop = useCallback(() => {}, []);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamingIdRef = useRef<string | null>(null);
   const toolUseMapRef = useRef<Map<string, ToolMeta>>(new Map());
@@ -500,9 +570,6 @@ function App() {
   // Tracks which resume attempt is latest so an older slow load doesn't
   // clobber a newer one if the user clicks quickly.
   const resumeTokenRef = useRef(0);
-  // Set once the user actually clicks a session. Prewarm watches this to
-  // yield IPC bandwidth for the user-initiated load.
-  const userInteractedRef = useRef(false);
 
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
@@ -569,9 +636,11 @@ function App() {
   }, [cwd, refreshBranches]);
 
   // Pre-warm every session's cache using the cheap tail endpoint so the
-  // first click on ANY session is as instant as the second. Paused the
-  // moment the user clicks a session so their click doesn't queue behind
-  // bulk prewarm IPCs.
+  // first click on ANY session is as instant as the second. Runs at low
+  // concurrency in the background and keeps going even after the user
+  // starts clicking — grid mode clicks don't touch this state, so making
+  // the main-mode path behave the same way closes the speed gap between
+  // the two.
   useEffect(() => {
     if (sessions.length === 0) return;
     let cancelled = false;
@@ -579,7 +648,7 @@ function App() {
     const concurrency = 2;
 
     const prewarmOne = async (s: SessionInfo) => {
-      if (cancelled || userInteractedRef.current) return;
+      if (cancelled) return;
       const existing = sessionCacheRef.current.get(s.id);
       if (existing && existing.mtime_ms === s.mtime_ms) return;
       try {
@@ -591,7 +660,7 @@ function App() {
           }),
           getGithubRepo(s.cwd),
         ]);
-        if (cancelled || userInteractedRef.current) return;
+        if (cancelled) return;
         const { entries, toolUseMap } = buildHistory(events, repo);
         sessionCacheRef.current.set(s.id, {
           entries,
@@ -605,7 +674,7 @@ function App() {
 
     const idx = { i: 0 };
     const worker = async () => {
-      while (!cancelled && !userInteractedRef.current) {
+      while (!cancelled) {
         const i = idx.i++;
         if (i >= queue.length) return;
         await prewarmOne(queue[i]);
@@ -708,13 +777,29 @@ function App() {
         cwd: ev.cwd,
         tools: ev.tools,
       });
-      setActiveSessionId(ev.session_id);
+      const newId = ev.session_id;
+      // When the user just sent their first message, it sits in the
+      // NEW_SESSION_KEY scratch slot. Fold it into the real session
+      // slot now that claude has assigned an id, so it doesn't orphan
+      // once the scratch slot resets.
+      if (newId) {
+        setAllTranscripts((prev) => {
+          const scratch = prev.get(NEW_SESSION_KEY) ?? [];
+          if (scratch.length === 0 && prev.has(newId)) return prev;
+          const next = new Map(prev);
+          const existing = next.get(newId) ?? [];
+          next.set(newId, [...scratch, ...existing]);
+          next.set(NEW_SESSION_KEY, []);
+          return next;
+        });
+      }
+      setActiveSessionId(newId);
       setEntries((es) => [
         ...es,
         {
           kind: "system",
           id: randomId(),
-          text: `session ${ev.session_id?.slice(0, 8) ?? ""} • model ${ev.model ?? "?"} • ${ev.tools?.length ?? 0} tools`,
+          text: `session ${newId?.slice(0, 8) ?? ""} • model ${ev.model ?? "?"} • ${ev.tools?.length ?? 0} tools`,
         },
       ]);
       return;
@@ -984,6 +1069,10 @@ function App() {
   }
 
   function resetSessionState() {
+    // Switch to the scratch slot first so the ref mirrored inside
+    // setEntries doesn't still point at the session we're leaving —
+    // otherwise setEntries([]) below would wipe the kept-alive copy.
+    setActiveSessionId(undefined);
     setEntries([]);
     setStderrLines([]);
     toolUseMapRef.current.clear();
@@ -991,7 +1080,6 @@ function App() {
     streamingIdRef.current = null;
     setBusy(false);
     setSessionMeta(null);
-    setActiveSessionId(undefined);
     setStuckToBottom(true);
     setHasNewBelow(false);
     // Preview is per-session — close it and forget detected URLs.
@@ -1092,10 +1180,8 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
-    const t0 = performance.now();
     const token = ++resumeTokenRef.current;
     const isLatest = () => resumeTokenRef.current === token;
-    userInteractedRef.current = true;
 
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
@@ -1129,24 +1215,23 @@ function App() {
     if (cacheHit) {
       toolUseMapRef.current = new Map(cached!.toolUseMap);
       toolUseMapGlobal.current = toolUseMapRef.current;
-      const t1 = performance.now();
-      setEntries([
-        ...cached!.entries,
-        { kind: "system", id: randomId(), text: "— resumed —" },
-      ]);
+      // If this session's transcript is already in the keep-alive map
+      // from an earlier visit, skip replacing its entries — swapping
+      // them would force React to diff + tear down its DOM, undoing
+      // the whole point of the keep-alive. The flip of activeSessionId
+      // already makes it visible.
+      const existingSlot = allTranscripts.get(sessionId);
+      const alreadyMounted = !!existingSlot && existingSlot.length > 0;
+      if (!alreadyMounted) {
+        setEntries([
+          ...cached!.entries,
+          { kind: "system", id: randomId(), text: "— resumed —" },
+        ]);
+      }
       setResumingId(null);
       requestAnimationFrame(() => {
         const el = transcriptScrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
-        requestAnimationFrame(() => {
-          const dt = performance.now() - t0;
-          const dtSince = performance.now() - t1;
-          // eslint-disable-next-line no-console
-          console.log(
-            `[resume:cache-hit] id=${sessionId.slice(0, 8)} entries=${cached!.entries.length} ` +
-              `total=${dt.toFixed(1)}ms paintAfterSetEntries=${dtSince.toFixed(1)}ms`,
-          );
-        });
       });
     } else {
       toolUseMapRef.current = new Map();
@@ -1170,7 +1255,6 @@ function App() {
 
     if (!cacheHit) {
       try {
-        const tInvoke = performance.now();
         // Fetch only the tail — it's what we need to render immediately and
         // parses/serializes in tens of ms vs hundreds for a full load.
         const [events, repo] = await Promise.all([
@@ -1182,16 +1266,7 @@ function App() {
           getGithubRepo(useCwd),
         ]);
         if (!isLatest()) return;
-        const tParsed = performance.now();
         const { entries: history, toolUseMap } = buildHistory(events, repo);
-        const tBuilt = performance.now();
-        // eslint-disable-next-line no-console
-        console.log(
-          `[resume:cache-miss] id=${sessionId.slice(0, 8)} events=${events.length} ` +
-            `invoke=${(tParsed - tInvoke).toFixed(1)}ms ` +
-            `build=${(tBuilt - tParsed).toFixed(1)}ms ` +
-            `total=${(performance.now() - t0).toFixed(1)}ms`,
-        );
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
@@ -1524,25 +1599,48 @@ function App() {
           />
         </div>
         <section className={`transcript-wrap ${gridMode ? "hidden" : ""}`}>
-          {entries.length === 0 ? (
-            <div className="empty">
-              {resumingId ? (
-                <p>loading session…</p>
-              ) : (
-                <>
-                  <p>Type a message below to start a new session, or pick a past one from the sidebar.</p>
-                  <p className="hint">Settings apply to the next session you start.</p>
-                </>
-              )}
-            </div>
-          ) : (
-            <PlainTranscript
-              entries={entries}
-              busy={busy}
-              scrollRef={transcriptScrollRef}
-              onAtBottomChange={handleAtBottomChange}
-            />
-          )}
+          {/* Render one PlainTranscript per kept session. Only the active
+              slot is visible; the others stay mounted behind display:none
+              so switching back to them is a CSS toggle instead of a
+              full DOM teardown + rebuild. */}
+          {Array.from(allTranscripts.entries()).map(([id, slotEntries]) => {
+            const activeKey = activeSessionId ?? NEW_SESSION_KEY;
+            const isActive = id === activeKey;
+            if (slotEntries.length === 0 && !isActive) return null;
+            if (slotEntries.length === 0 && isActive) {
+              return (
+                <div key={id} className="empty">
+                  {resumingId ? (
+                    <p>loading session…</p>
+                  ) : (
+                    <>
+                      <p>
+                        Type a message below to start a new session, or pick a
+                        past one from the sidebar.
+                      </p>
+                      <p className="hint">
+                        Settings apply to the next session you start.
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div
+                key={id}
+                className={`transcript-slot ${isActive ? "active" : "kept"}`}
+                aria-hidden={!isActive}
+              >
+                <PlainTranscript
+                  entries={slotEntries}
+                  busy={isActive ? busy : false}
+                  scrollRef={isActive ? transcriptScrollRef : noopScrollRef}
+                  onAtBottomChange={isActive ? handleAtBottomChange : noop}
+                />
+              </div>
+            );
+          })}
           {!stuckToBottom && entries.length > 0 && (
             <button
               className={`jump-bottom ${hasNewBelow ? "pulse" : ""}`}
