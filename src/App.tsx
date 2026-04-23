@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -148,6 +148,81 @@ export const SESSION_TAIL_LIMIT = 200;
 
 export function randomId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// Convert a transcript's Entry[] into a markdown string suitable for
+// saving / sharing. Assistant text blocks are written verbatim (they're
+// already markdown); tool uses and tool results are rendered as fenced
+// code blocks with the tool name for context. Ephemeral system lines
+// are dropped to keep the export clean.
+export function sessionEntriesToMarkdown(
+  entries: Entry[],
+  header: {
+    title?: string;
+    sessionId?: string;
+    model?: string;
+    cwd?: string;
+  },
+): string {
+  const lines: string[] = [];
+  const meta = [
+    header.title ? `# ${header.title}` : undefined,
+    "",
+    header.sessionId ? `- session: \`${header.sessionId}\`` : undefined,
+    header.model ? `- model: \`${header.model}\`` : undefined,
+    header.cwd ? `- project: \`${header.cwd}\`` : undefined,
+  ].filter((x): x is string => typeof x === "string");
+  if (meta.length > 0) {
+    lines.push(...meta, "");
+  }
+  for (const e of entries) {
+    if (e.kind === "user") {
+      lines.push("## You", "", e.text.trim(), "");
+    } else if (e.kind === "assistant") {
+      lines.push("## Claude", "");
+      for (const b of e.blocks) {
+        if (b.type === "text") {
+          const t = (b as TextBlock).text ?? "";
+          if (t.trim()) lines.push(t.trim(), "");
+        } else if (b.type === "thinking") {
+          const t = (b as ThinkingBlock).thinking ?? "";
+          if (t.trim()) {
+            lines.push("<details><summary>thinking</summary>", "", t.trim(), "", "</details>", "");
+          }
+        } else if (b.type === "tool_use") {
+          const tu = b as ToolUseBlock;
+          const name = tu.name || "tool";
+          let inputStr = "";
+          try {
+            inputStr = JSON.stringify(tu.input ?? {}, null, 2);
+          } catch {
+            inputStr = String(tu.input ?? "");
+          }
+          lines.push(`### tool: ${name}`, "", "```json", inputStr, "```", "");
+        }
+      }
+    } else if (e.kind === "tool_result") {
+      const content = e.content;
+      const text =
+        typeof content === "string"
+          ? content
+          : content
+              .map((p) => (p.type === "text" ? p.text ?? "" : ""))
+              .join("\n");
+      if (text.trim()) {
+        lines.push(
+          `#### result${e.isError ? " (error)" : ""}`,
+          "",
+          "```",
+          text.trim(),
+          "```",
+          "",
+        );
+      }
+    }
+    // Skip `system` and `result` marker lines — they're UI-only noise.
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
 }
 
 // Heuristic: does this assistant text look like it's asking the user a
@@ -1818,6 +1893,44 @@ function App() {
                 <option value="plan">plan</option>
               </select>
             </label>
+            <button
+              type="button"
+              className="btn btn-secondary grid-mode-toggle"
+              disabled={gridMode || entries.length === 0}
+              onClick={async () => {
+                const info = activeSessionId
+                  ? sessions.find((s) => s.id === activeSessionId)
+                  : undefined;
+                const md = sessionEntriesToMarkdown(entries, {
+                  title: info?.title,
+                  sessionId: activeSessionId,
+                  model: info?.model || model,
+                  cwd: info?.cwd || cwd,
+                });
+                const baseName = (info?.title || "session")
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, "-")
+                  .replace(/^-+|-+$/g, "")
+                  .slice(0, 60);
+                const suggested = `${baseName || "session"}.md`;
+                try {
+                  const chosen = await saveDialog({
+                    defaultPath: suggested,
+                    filters: [{ name: "Markdown", extensions: ["md"] }],
+                  });
+                  if (!chosen) return;
+                  await invoke("write_text_file", {
+                    path: chosen,
+                    content: md,
+                  });
+                } catch (e) {
+                  console.error("export failed:", e);
+                }
+              }}
+              title="export this conversation as a markdown file"
+            >
+              ↓ export
+            </button>
             <button
               type="button"
               className={`btn btn-secondary grid-mode-toggle ${gridMode ? "active" : ""}`}
