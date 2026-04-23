@@ -97,6 +97,18 @@ async fn start_session(
         cmd.arg("--resume").arg(rid);
     }
 
+    // Bail early with a clear error if the cwd doesn't exist — otherwise
+    // spawn fails with a bare ENOENT that looks identical to the binary
+    // not being found. Important not to silently swap in $HOME: for a
+    // --resume, claude resolves the session file relative to the cwd's
+    // project folder, so the wrong cwd would trigger error_during_execution
+    // far from the actual source of the problem.
+    if cwd.is_empty() || !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!(
+            "project directory doesn't exist: {} — pick a new cwd or remove this session",
+            if cwd.is_empty() { "(none)" } else { cwd.as_str() }
+        ));
+    }
     cmd.current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
