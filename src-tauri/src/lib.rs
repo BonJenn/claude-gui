@@ -80,6 +80,15 @@ async fn start_session(
         .arg("--include-partial-messages")
         .arg("--permission-mode").arg(&mode);
 
+    // Extend the CLI's directory sandbox to cover the whole home dir so
+    // claude can read/write anywhere the user typically works. Per-tool
+    // approval still goes through the permission prompt UI, so this isn't
+    // a silent bypass — it just stops the "sandboxed in another directory"
+    // dead-end for cross-project file access.
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+        cmd.arg("--add-dir").arg(home);
+    }
+
     if let Some(m) = model.filter(|s| !s.is_empty()) {
         cmd.arg("--model").arg(m);
     }
