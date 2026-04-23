@@ -2208,6 +2208,31 @@ details.block[open] > summary::before,
   word-wrap: break-word;
 }
 
+/* inline-editable title (sidebar + grid panel header) */
+.editable-title {
+  cursor: text;
+  border-radius: 3px;
+}
+.editable-title:hover {
+  background: var(--bg-elev);
+  outline: 1px dashed var(--border);
+  outline-offset: 1px;
+}
+.editable-title-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  outline: none;
+}
+
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -656,6 +656,66 @@ fn load_session(session_id: String, cwd: String) -> Result<Vec<serde_json::Value
 /// iteration + a substring prefilter keep this in the tens of ms even for
 /// 10 MB session files.
 #[tauri::command]
+fn set_session_title(session_id: String, cwd: String, title: String) -> Result<(), String> {
+    use std::io::Write;
+    let path = session_path(&session_id, &cwd)
+        .ok_or_else(|| "no HOME".to_string())?;
+    if !path.exists() {
+        return Err("session file not found".to_string());
+    }
+    let trimmed = title.trim();
+    // summarize_session takes the most recent custom-title record, so appending
+    // is enough — no need to rewrite prior lines.
+    let record = serde_json::json!({
+        "type": "custom-title",
+        "customTitle": trimmed,
+        "timestamp": chrono_now_iso(),
+    });
+    let line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{}", line).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn chrono_now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    // Simple RFC3339-ish UTC stamp without pulling in chrono.
+    let secs = d.as_secs();
+    let millis = d.subsec_millis();
+    let (y, mo, da, h, mi, se) = epoch_to_ymdhms(secs);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, mo, da, h, mi, se, millis
+    )
+}
+
+fn epoch_to_ymdhms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (secs / 86400) as i64;
+    let rem = (secs % 86400) as u32;
+    let h = rem / 3600;
+    let mi = (rem % 3600) / 60;
+    let se = rem % 60;
+    // Civil-from-days algorithm (Howard Hinnant).
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d, h, mi, se)
+}
+
+#[tauri::command]
 fn load_session_tail(
     session_id: String,
     cwd: String,
@@ -714,7 +774,8 @@ pub fn run() {
             preview_navigate,
             window_top_inset,
             load_session_tail,
-            git_remote_url
+            git_remote_url,
+            set_session_title
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

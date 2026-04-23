@@ -16,6 +16,7 @@ import {
   EntryView,
   TypingIndicator,
   setToolUseMapForPanel,
+  EditableTitle,
 } from "./App";
 
 // A self-contained live session. Each LivePanel owns its own subprocess,
@@ -33,6 +34,7 @@ export function LivePanel({
   isActive,
   onFocus,
   onRemove,
+  onRename,
   onSessionStarted,
 }: {
   panelId: string;
@@ -49,6 +51,7 @@ export function LivePanel({
   isActive: boolean;
   onFocus: () => void;
   onRemove: () => void;
+  onRename?: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted?: (panelId: string, sessionId: string) => void;
 }) {
   const [entries, setEntries] = useState<Entry[]>(() => {
@@ -62,6 +65,10 @@ export function LivePanel({
   const [busy, setBusy] = useState(false);
   const [sessionOn, setSessionOn] = useState(false);
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
+  const [title, setTitle] = useState<string | undefined>(initialTitle);
+  useEffect(() => {
+    setTitle(initialTitle);
+  }, [initialTitle]);
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
   const streamingIdRef = useRef<string | null>(null);
@@ -319,9 +326,22 @@ export function LivePanel({
       onMouseDown={onFocus}
     >
       <header className="grid-panel-head">
-        <div className="grid-panel-title" title={initialTitle || sessionId}>
-          {initialTitle || "(new)"}
-        </div>
+        {onRename && sessionId ? (
+          <EditableTitle
+            className="grid-panel-title"
+            value={title || ""}
+            placeholder="(new)"
+            title={title || sessionId}
+            onSave={async (next) => {
+              setTitle(next);
+              await onRename(sessionId, initialCwd, next);
+            }}
+          />
+        ) : (
+          <div className="grid-panel-title" title={title || sessionId}>
+            {title || "(new)"}
+          </div>
+        )}
         <div className="grid-panel-meta">
           <span className={`dot ${sessionOn ? "on" : "off"}`} />
           <span className="grid-panel-project">{project}</span>
