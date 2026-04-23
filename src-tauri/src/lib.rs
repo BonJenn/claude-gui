@@ -93,9 +93,25 @@ async fn start_session(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Ok(path) = std::env::var("PATH") {
-        cmd.env("PATH", format!("{}:/usr/local/bin:/opt/homebrew/bin", path));
+    // Make sure the spawned claude can be found even when the launching
+    // environment has a minimal PATH. Cover the common install locations.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut extras: Vec<String> = Vec::new();
+    extras.push("/usr/local/bin".into());
+    extras.push("/opt/homebrew/bin".into());
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+        extras.push(format!("{}/.npm-global/bin", home));
+        extras.push(format!("{}/.local/bin", home));
+        extras.push(format!("{}/.volta/bin", home));
+        extras.push(format!("{}/.bun/bin", home));
+        extras.push(format!("{}/.cargo/bin", home));
     }
+    let combined = if path.is_empty() {
+        extras.join(":")
+    } else {
+        format!("{}:{}", path, extras.join(":"))
+    };
+    cmd.env("PATH", combined);
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn claude: {}", e))?;
     let stdin = child.stdin.take().ok_or_else(|| "no stdin handle".to_string())?;
