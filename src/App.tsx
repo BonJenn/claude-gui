@@ -1288,34 +1288,40 @@ function App() {
         resumingId={resumingId}
         onResume={(id, cwd) => {
           if (gridMode) {
-            // In grid mode: clicking a sidebar session either replaces the
-            // selected panel or appends a fresh panel (when empty / nothing
-            // selected / the session is already in the grid).
+            // Clicking a sidebar session:
+            //   * if it's already in the grid → focus it
+            //   * if there's an empty slot → append (don't touch selection)
+            //   * if the grid is full → replace the selected panel (or last)
             if (gridPanels.includes(id)) {
               setSelectedGridPanelId(id);
               return;
             }
-            if (selectedGridPanelId && gridPanels.includes(selectedGridPanelId)) {
-              setGridPanels((prev) => {
-                const idx = prev.indexOf(selectedGridPanelId);
-                if (idx < 0) return prev;
-                const next = prev.slice();
-                next[idx] = id;
-                return next;
-              });
-              setSelectedGridPanelId(id);
-            } else if (gridPanels.length < 6) {
+            if (gridPanels.length < 6) {
               setGridPanels((prev) => [...prev, id]);
               setSelectedGridPanelId(id);
-            } else {
-              // Full grid with no selection — replace the last panel.
-              setGridPanels((prev) => {
-                const next = prev.slice();
-                next[next.length - 1] = id;
+              return;
+            }
+            // Full grid — replace the selected panel (or last).
+            const targetId =
+              selectedGridPanelId && gridPanels.includes(selectedGridPanelId)
+                ? selectedGridPanelId
+                : gridPanels[gridPanels.length - 1];
+            setGridPanels((prev) => {
+              const idx = prev.indexOf(targetId);
+              if (idx < 0) return prev;
+              const next = prev.slice();
+              next[idx] = id;
+              return next;
+            });
+            if (targetId.startsWith("new:")) {
+              setNewPanelCwds((m) => {
+                if (!(targetId in m)) return m;
+                const next = { ...m };
+                delete next[targetId];
                 return next;
               });
-              setSelectedGridPanelId(id);
             }
+            setSelectedGridPanelId(id);
           } else {
             resumeSession(id, cwd);
           }
