@@ -2068,6 +2068,12 @@ details.block[open] > summary::before,
   gap: 6px;
 }
 
+/* Tighter attachment row inside a grid-panel composer; the base
+   `.attachments` has the composer's own padding around it. */
+.grid-panel-composer .panel-attachments {
+  margin-bottom: 6px;
+}
+
 .attachment {
   display: inline-flex;
   align-items: center;

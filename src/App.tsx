@@ -529,6 +529,32 @@ function App() {
           setDragOver(false);
           const paths = (e.payload as { paths?: string[] }).paths ?? [];
           if (paths.length === 0) return;
+          // In grid mode, route the drop to whichever tile is under
+          // the cursor. Tauri reports position in physical pixels, so
+          // divide by devicePixelRatio to compare against CSS coords.
+          const pos = (
+            e.payload as { position?: { x: number; y: number } }
+          ).position;
+          let routed = false;
+          if (pos) {
+            const dpr = window.devicePixelRatio || 1;
+            const cssX = pos.x / dpr;
+            const cssY = pos.y / dpr;
+            const stack = document.elementsFromPoint(cssX, cssY);
+            for (const el of stack) {
+              const tile = el.closest(".grid-panel.live");
+              if (tile) {
+                tile.dispatchEvent(
+                  new CustomEvent<string[]>("claude-gui:drop-files", {
+                    detail: paths,
+                  }),
+                );
+                routed = true;
+                break;
+              }
+            }
+          }
+          if (routed) return;
           setAttachments((prev) => {
             const existing = new Set(prev.map((a) => a.path));
             const additions = paths
