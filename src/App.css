@@ -2097,10 +2097,61 @@ details.block[open] > summary::before,
   gap: 6px;
 }
 
+.quick-replies {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-quick {
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.btn-quick:hover {
+  border-color: var(--accent);
+}
+
+.btn-quick-yes:hover {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.btn-quick-no:hover {
+  background: color-mix(in srgb, var(--err) 15%, transparent);
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.btn-quick-chat:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* Tighter attachment row inside a grid-panel composer; the base
    `.attachments` has the composer's own padding around it. */
 .grid-panel-composer .panel-attachments {
   margin-bottom: 6px;
+}
+
+.grid-panel-composer .panel-quick-replies {
+  margin-bottom: 6px;
+  gap: 6px;
+}
+
+.grid-panel-composer .panel-quick-replies .btn-quick {
+  padding: 3px 10px;
+  font-size: 11.5px;
 }
 
 .attachment {

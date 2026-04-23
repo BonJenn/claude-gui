@@ -150,6 +150,27 @@ export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// Heuristic: does this assistant text look like it's asking the user a
+// yes/no question? Used to render quick-reply buttons above the composer
+// so the user can answer with one click. Stays loose — false positives
+// are cheap (clicking "yes" still sends a sensible message) and false
+// negatives just mean no buttons appear.
+export function looksLikeYesNoQuestion(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t.endsWith("?")) return false;
+  // Take just the final sentence — earlier question marks in the body
+  // (e.g. quoting the user) don't tell us about the *current* ask.
+  const parts = t.split(/(?<=[.!?])\s+/);
+  const last = (parts[parts.length - 1] || t).toLowerCase().trim();
+  const stripped = last.replace(/^[\s"'*_`>-]+/, "");
+  const leads =
+    /^(should|do|does|did|can|could|will|would|shall|is|are|was|were|have|has|had|may|might|want|ready|ok|okay|sound)\b/;
+  const phrases =
+    /\b(want me to|shall i|should i|do you want|would you like|make sense|sound good|sound right|sound okay|sound ok|that (ok|okay|good)|go ahead)\b/;
+  return leads.test(stripped) || phrases.test(last);
+}
+
 // Heuristic: match the couple of ways the claude CLI surfaces a bad
 // credential — stderr prefix, stringified API error JSON, or the plain
 // 401 message. Kept loose on purpose since we can't rely on exact wording
@@ -1476,6 +1497,48 @@ function App() {
     }
   }
 
+  // Fire a short user reply without touching the composer input — used
+  // by the yes/no quick-reply buttons. Mirrors send() minus the input
+  // and attachment handling.
+  async function sendQuickReply(text: string) {
+    if (busy || !text) return;
+    if (!sessionOn) {
+      try {
+        await invoke("start_session", {
+          panelId: "main",
+          cwd,
+          permissionMode,
+          model: model || null,
+          resumeId: null,
+        });
+        setSessionOn(true);
+      } catch (e) {
+        setEntries((es) => [
+          ...es,
+          { kind: "system", id: randomId(), text: `failed to start: ${e}` },
+        ]);
+        return;
+      }
+    }
+    setEntries((es) => [
+      ...es,
+      { kind: "user", id: randomId(), text },
+    ]);
+    lastUserMessageRef.current = text;
+    setBusy(true);
+    setStuckToBottom(true);
+    setHasNewBelow(false);
+    try {
+      await invoke("send_message", { panelId: "main", text });
+    } catch (e) {
+      setBusy(false);
+      setEntries((es) => [
+        ...es,
+        { kind: "system", id: randomId(), text: `send failed: ${e}` },
+      ]);
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || busy) return;
@@ -1893,6 +1956,53 @@ function App() {
 
         {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
+          {(() => {
+            // Show yes/no quick-reply buttons when claude's last message
+            // ends in a yes/no-shaped question and the user hasn't already
+            // replied. Hidden while a turn is in-flight.
+            if (busy) return null;
+            let lastText = "";
+            for (let i = entries.length - 1; i >= 0; i--) {
+              const e = entries[i];
+              if (e.kind === "user") break;
+              if (e.kind === "assistant") {
+                for (let j = e.blocks.length - 1; j >= 0; j--) {
+                  const b = e.blocks[j];
+                  if (b.type === "text") {
+                    lastText = (b as TextBlock).text || "";
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+            if (!looksLikeYesNoQuestion(lastText)) return null;
+            return (
+              <div className="quick-replies" role="group" aria-label="quick reply">
+                <button
+                  type="button"
+                  className="btn btn-quick btn-quick-yes"
+                  onClick={() => sendQuickReply("yes")}
+                >
+                  Yes
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quick btn-quick-no"
+                  onClick={() => sendQuickReply("no")}
+                >
+                  No
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quick btn-quick-chat"
+                  onClick={() => inputRef.current?.focus()}
+                >
+                  Let's chat about it
+                </button>
+              </div>
+            );
+          })()}
           {attachments.length > 0 && (
             <div className="attachments">
               {attachments.map((a) => {
