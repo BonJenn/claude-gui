@@ -171,6 +171,33 @@ async fn send_message(
     Ok(())
 }
 
+/// Writes an arbitrary JSON line to the panel's subprocess stdin. Used
+/// for control_response (answering Claude's permission prompts) and for
+/// control_request (e.g. mid-session set_permission_mode changes).
+#[tauri::command]
+async fn send_raw(
+    state: State<'_, AppState>,
+    panel_id: String,
+    line: String,
+) -> Result<(), String> {
+    let mut guard = state.sessions.lock().await;
+    let session = guard
+        .get_mut(&panel_id)
+        .ok_or_else(|| format!("no active session for panel {}", panel_id))?;
+    let body = if line.ends_with('\n') {
+        line
+    } else {
+        format!("{}\n", line)
+    };
+    session
+        .stdin
+        .write_all(body.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    session.stdin.flush().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
     let mut guard = state.sessions.lock().await;
@@ -667,6 +694,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_session,
             send_message,
+            send_raw,
             stop_session,
             interrupt_session,
             default_cwd,

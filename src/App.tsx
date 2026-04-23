@@ -10,7 +10,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { compileMarkdown } from "./markdown";
-import { LivePanel } from "./LivePanel";
+import {
+  LivePanel,
+  setPermissionModeOnPanel,
+  respondPermission,
+  type PermissionRequest,
+} from "./LivePanel";
 import "./App.css";
 
 // Hoisted so they're stable across renders — creating them fresh each time
@@ -298,6 +303,8 @@ function App() {
   const [attachments, setAttachments] = useState<{ id: string; path: string }[]>(
     [],
   );
+  const [pendingPermission, setPendingPermission] =
+    useState<PermissionRequest | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
@@ -667,6 +674,18 @@ function App() {
   }
 
   function handleEvent(ev: StreamEvent) {
+    const any = ev as Record<string, unknown>;
+    if (any.type === "control_request") {
+      const req = any.request as Record<string, unknown> | undefined;
+      if (req && req.subtype === "can_use_tool") {
+        setPendingPermission({
+          requestId: String(any.request_id ?? ""),
+          toolName: String(req.tool_name ?? "unknown"),
+          input: req.input,
+        });
+      }
+      return;
+    }
     if (ev.type === "system" && ev.subtype === "init") {
       setSessionMeta({
         sessionId: ev.session_id,
@@ -1413,7 +1432,16 @@ function App() {
               <span>permissions</span>
               <select
                 value={permissionMode}
-                onChange={(e) => setPermissionMode(e.target.value)}
+                onChange={(e) => {
+                  const mode = e.target.value;
+                  setPermissionMode(mode);
+                  // If the main-panel subprocess is alive, push the change
+                  // through immediately instead of waiting for the next
+                  // session restart.
+                  if (sessionOn) {
+                    setPermissionModeOnPanel("main", mode);
+                  }
+                }}
               >
                 <option value="bypassPermissions">bypass</option>
                 <option value="acceptEdits">acceptEdits</option>
@@ -1497,6 +1525,25 @@ function App() {
             >
               ↓
             </button>
+          )}
+          {pendingPermission && (
+            <PermissionPromptOverlay
+              req={pendingPermission}
+              onAllow={async () => {
+                await respondPermission("main", pendingPermission, true);
+                setPendingPermission(null);
+              }}
+              onDeny={async () => {
+                await respondPermission("main", pendingPermission, false);
+                setPendingPermission(null);
+              }}
+              onAllowAndBypass={async () => {
+                await respondPermission("main", pendingPermission, true);
+                await setPermissionModeOnPanel("main", "bypassPermissions");
+                setPermissionMode("bypassPermissions");
+                setPendingPermission(null);
+              }}
+            />
           )}
         </section>
 
@@ -3114,6 +3161,48 @@ function GridTranscripts({
         );
       })}
     </section>
+  );
+}
+
+function PermissionPromptOverlay({
+  req,
+  onAllow,
+  onDeny,
+  onAllowAndBypass,
+}: {
+  req: PermissionRequest;
+  onAllow: () => void;
+  onDeny: () => void;
+  onAllowAndBypass: () => void;
+}) {
+  const inputPreview = (() => {
+    try {
+      return JSON.stringify(req.input, null, 2);
+    } catch {
+      return String(req.input);
+    }
+  })();
+  return (
+    <div className="permission-overlay">
+      <div className="permission-card">
+        <div className="permission-prompt-title">
+          claude wants to use{" "}
+          <span className="permission-tool">{req.toolName}</span>
+        </div>
+        <pre className="permission-prompt-input">{inputPreview}</pre>
+        <div className="permission-prompt-actions">
+          <button className="btn btn-secondary" onClick={onDeny}>
+            deny
+          </button>
+          <button className="btn btn-secondary" onClick={onAllowAndBypass}>
+            allow + bypass rest of session
+          </button>
+          <button className="btn btn-send" onClick={onAllow}>
+            allow
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
