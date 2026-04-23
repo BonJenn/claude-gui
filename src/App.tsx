@@ -356,6 +356,13 @@ function App() {
   const [selectedGridPanelId, setSelectedGridPanelId] = useState<string | null>(
     null,
   );
+  // Maps a grid panel key (which may be a "new:..." placeholder) to the
+  // real session id reported by the subprocess's first init event. Without
+  // this, the topbar sync below can't find the session info for freshly
+  // started panels because their panel key never matches a session id.
+  const [panelSessionIds, setPanelSessionIds] = useState<Record<string, string>>(
+    {},
+  );
   useEffect(() => {
     if (!gridMode) return;
     if (gridPanels.length === 0) {
@@ -372,12 +379,20 @@ function App() {
   // looking at. Nothing here touches the main-session subprocess.
   useEffect(() => {
     if (!gridMode || !selectedGridPanelId) return;
-    const info = sessions.find((s) => s.id === selectedGridPanelId);
-    if (!info) return;
-    if (info.cwd) setCwd(info.cwd);
-    if (info.model) setModel(info.model);
-    if (info.permission_mode) setPermissionMode(info.permission_mode);
-  }, [gridMode, selectedGridPanelId, sessions]);
+    const realId = panelSessionIds[selectedGridPanelId] || selectedGridPanelId;
+    const info = sessions.find((s) => s.id === realId);
+    if (info) {
+      if (info.cwd) setCwd(info.cwd);
+      if (info.model) setModel(info.model);
+      if (info.permission_mode) setPermissionMode(info.permission_mode);
+      return;
+    }
+    // New panel that hasn't reported a session id yet (or the sessions
+    // list hasn't refreshed). Pull the cwd the user picked at creation
+    // so the topbar at least reflects where this panel will run.
+    const pendingCwd = newPanelCwds[selectedGridPanelId];
+    if (pendingCwd) setCwd(pendingCwd);
+  }, [gridMode, selectedGridPanelId, sessions, panelSessionIds, newPanelCwds]);
   useEffect(() => {
     localStorage.setItem("gridMode", gridMode ? "1" : "0");
   }, [gridMode]);
@@ -1485,10 +1500,21 @@ function App() {
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
             newPanelCwds={newPanelCwds}
-            onSessionStarted={() => refreshSessions()}
+            onSessionStarted={(panelId, sid) => {
+              setPanelSessionIds((m) =>
+                m[panelId] === sid ? m : { ...m, [panelId]: sid },
+              );
+              refreshSessions();
+            }}
             onRemove={(id) => {
               setGridPanels((prev) => prev.filter((x) => x !== id));
               setNewPanelCwds((m) => {
+                if (!(id in m)) return m;
+                const next = { ...m };
+                delete next[id];
+                return next;
+              });
+              setPanelSessionIds((m) => {
                 if (!(id in m)) return m;
                 const next = { ...m };
                 delete next[id];
@@ -3005,7 +3031,7 @@ function LiveGrid({
   onAddPanel: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
-  onSessionStarted: (sessionId: string) => void;
+  onSessionStarted: (panelId: string, sessionId: string) => void;
 }) {
   if (panels.length === 0) {
     return (
