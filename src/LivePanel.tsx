@@ -19,6 +19,7 @@ import {
   setToolUseMapForPanel,
   EditableTitle,
   SESSION_TAIL_LIMIT,
+  looksLikeYesNoQuestion,
 } from "./App";
 
 // A self-contained live session. Each LivePanel owns its own subprocess,
@@ -498,6 +499,27 @@ export function LivePanel({
     }
   }, [input, busy, panelId, attachments]);
 
+  // Fire a short user reply without touching input/attachments — used
+  // by the yes/no quick-reply buttons.
+  const sendQuickReply = useCallback(
+    async (text: string) => {
+      if (busy || !text) return;
+      setEntries((es) => [...es, { kind: "user", id: randomId(), text }]);
+      lastUserMessageRef.current = text;
+      setBusy(true);
+      try {
+        await invoke("send_message", { panelId, text });
+      } catch (e) {
+        setBusy(false);
+        setEntries((es) => [
+          ...es,
+          { kind: "system", id: randomId(), text: `send failed: ${e}` },
+        ]);
+      }
+    },
+    [busy, panelId],
+  );
+
   // Restart this panel's subprocess in bypassPermissions mode and replay
   // the last user message. Used by the denial overlay's "allow & retry".
   const allowAndRetry = useCallback(async () => {
@@ -649,6 +671,59 @@ export function LivePanel({
         )}
       </div>
       <footer className="grid-panel-composer">
+        {(() => {
+          if (busy) return null;
+          let lastText = "";
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const e = entries[i];
+            if (e.kind === "user") break;
+            if (e.kind === "assistant") {
+              for (let j = e.blocks.length - 1; j >= 0; j--) {
+                const b = e.blocks[j];
+                if (b.type === "text") {
+                  lastText = (b as TextBlock).text || "";
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!looksLikeYesNoQuestion(lastText)) return null;
+          return (
+            <div
+              className="quick-replies panel-quick-replies"
+              role="group"
+              aria-label="quick reply"
+            >
+              <button
+                type="button"
+                className="btn btn-quick btn-quick-yes"
+                onClick={() => sendQuickReply("yes")}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className="btn btn-quick btn-quick-no"
+                onClick={() => sendQuickReply("no")}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                className="btn btn-quick btn-quick-chat"
+                onClick={() => {
+                  const ta = rootRef.current?.querySelector(
+                    "textarea",
+                  ) as HTMLTextAreaElement | null;
+                  ta?.focus();
+                }}
+              >
+                Let's chat about it
+              </button>
+            </div>
+          );
+        })()}
         {attachments.length > 0 && (
           <div className="attachments panel-attachments">
             {attachments.map((a) => {
