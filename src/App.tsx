@@ -3296,6 +3296,54 @@ function LiveGrid({
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted: (panelId: string, sessionId: string) => void;
 }) {
+  // Draggable divider between the two rows lets the user rebalance tile
+  // heights. Stored as a fraction of the grid's height taken by the top
+  // row (between 0.15 and 0.85 so tiles never fully collapse).
+  const containerRef = useRef<HTMLElement>(null);
+  const [topFraction, setTopFraction] = useState<number>(() => {
+    const raw = localStorage.getItem("gridRowTopFraction");
+    const n = raw ? parseFloat(raw) : NaN;
+    if (!Number.isFinite(n)) return 0.5;
+    return Math.max(0.15, Math.min(0.85, n));
+  });
+  useEffect(() => {
+    localStorage.setItem("gridRowTopFraction", String(topFraction));
+  }, [topFraction]);
+  const onRowDividerPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+      document.body.dataset.resizing = "true";
+      // Full-window overlay so any child webviews can't hijack the drag.
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;z-index:99999;cursor:row-resize;";
+      document.body.appendChild(overlay);
+      const move = (ev: PointerEvent) => {
+        const y = ev.clientY - rect.top;
+        const frac = y / rect.height;
+        setTopFraction(Math.max(0.15, Math.min(0.85, frac)));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        delete document.body.dataset.resizing;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    },
+    [],
+  );
+
   if (panels.length === 0) {
     return (
       <section className="grid-transcripts empty-grid">
@@ -3319,10 +3367,19 @@ function LiveGrid({
   }
   const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
+  const rowCount = Math.ceil(tileCount / columns);
+  const showRowDivider = rowCount >= 2;
+  const gridTemplateRows = showRowDivider
+    ? `${topFraction}fr ${1 - topFraction}fr`
+    : undefined;
   return (
     <section
+      ref={containerRef}
       className="grid-transcripts live"
-      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+      style={{
+        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+        gridTemplateRows,
+      }}
     >
       {panels.map((id) => {
         const info = sessions.find((s) => s.id === id);
@@ -3374,6 +3431,17 @@ function LiveGrid({
           <span className="grid-add-plus">+</span>
           <span className="grid-add-label">new panel</span>
         </button>
+      )}
+      {showRowDivider && (
+        <div
+          className="grid-row-divider"
+          style={{ top: `${(topFraction * 100).toFixed(2)}%` }}
+          onPointerDown={onRowDividerPointerDown}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="resize row heights"
+          title="drag to resize rows"
+        />
       )}
     </section>
   );
