@@ -2,6 +2,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -148,6 +153,41 @@ export const SESSION_TAIL_LIMIT = 200;
 
 export function randomId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// Fire a native OS notification when a turn finishes, but only if the
+// window isn't already focused (no point interrupting the user who's
+// watching the transcript). First call lazily requests permission;
+// subsequent calls skip the IPC if the user ever denied.
+let notificationPermissionState: "unknown" | "granted" | "denied" = "unknown";
+export async function notifyTurnComplete(opts: {
+  title: string;
+  body: string;
+  isError?: boolean;
+}) {
+  if (typeof document !== "undefined" && document.hasFocus()) return;
+  if (notificationPermissionState === "denied") return;
+  try {
+    if (notificationPermissionState === "unknown") {
+      const granted = await isPermissionGranted();
+      if (!granted) {
+        const res = await requestPermission();
+        notificationPermissionState = res === "granted" ? "granted" : "denied";
+      } else {
+        notificationPermissionState = "granted";
+      }
+    }
+    if (notificationPermissionState !== "granted") return;
+    await sendNotification({
+      title: opts.isError ? `Claude error — ${opts.title}` : opts.title,
+      body: opts.body.slice(0, 240),
+    });
+  } catch (e) {
+    // If the plugin bails (permission revoked mid-session, etc.) we
+    // don't want to keep hammering it.
+    notificationPermissionState = "denied";
+    console.error("notifyTurnComplete failed:", e);
+  }
 }
 
 // Convert a transcript's Entry[] into a markdown string suitable for
@@ -1125,6 +1165,35 @@ function App() {
       if (ev.is_error) {
         setShowStderr(true);
       }
+      // Fire a native notification so the user doesn't have to watch
+      // the window while a long turn runs. Uses the latest assistant
+      // text as the body (first 240 chars).
+      (() => {
+        const info = activeSessionIdRef.current
+          ? sessions.find((s) => s.id === activeSessionIdRef.current)
+          : undefined;
+        const title = info?.title || "Claude";
+        let body = "";
+        const es = allTranscripts.get(
+          activeSessionIdRef.current ?? NEW_SESSION_KEY,
+        );
+        if (es) {
+          for (let i = es.length - 1; i >= 0; i--) {
+            const e = es[i];
+            if (e.kind === "assistant") {
+              for (const b of e.blocks) {
+                if (b.type === "text") {
+                  body = (b as TextBlock).text || "";
+                  break;
+                }
+              }
+              if (body) break;
+            }
+          }
+        }
+        if (!body) body = ev.is_error ? "turn ended with an error" : "turn complete";
+        void notifyTurnComplete({ title, body, isError: !!ev.is_error });
+      })();
       // claude -p auto-denies tool uses when the permission mode isn't
       // bypassPermissions; the denials show up here rather than as a
       // live control_request. Surface them so the user can approve
