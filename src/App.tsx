@@ -1609,7 +1609,16 @@ function App() {
       )}
       <Sidebar
         sessions={sessions}
-        activeId={gridMode ? undefined : activeSessionId}
+        activeId={
+          gridMode
+            ? selectedGridPanelId
+              ? selectedGridPanelId.startsWith("new:")
+                ? panelSessionIds[selectedGridPanelId]
+                : selectedGridPanelId
+              : undefined
+            : activeSessionId
+        }
+        pinActiveToTop={!gridMode}
         loading={sessionsLoading}
         resumingId={resumingId}
         onResume={(id, cwd) => {
@@ -2486,6 +2495,7 @@ function Sidebar({
   onGroupedChange,
   width,
   onResizeStart,
+  pinActiveToTop = true,
 }: {
   sessions: SessionInfo[];
   activeId?: string;
@@ -2504,18 +2514,24 @@ function Sidebar({
   onGroupedChange: (value: boolean) => void;
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
+  /** When false, activeId is used for highlight only — the list
+   *  doesn't float the active item to the top or scroll to it. Used
+   *  in grid mode so clicking between tiles doesn't reshuffle the
+   *  sidebar. */
+  pinActiveToTop?: boolean;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   // The active session is reordered to the top of the filtered list, so
   // snapping the sidebar to scrollTop: 0 puts it in view immediately.
+  // Skipped when pinActiveToTop is false (grid-mode highlight).
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId || !pinActiveToTop) return;
     const list = listRef.current;
     if (!list) return;
     list.scrollTo({ top: 0, behavior: "auto" });
-  }, [activeId]);
+  }, [activeId, pinActiveToTop]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
   const projects = useMemo(() => {
@@ -2544,15 +2560,16 @@ function Sidebar({
       );
     });
     // Only float the active to the top in flat mode — in grouped mode it
-    // belongs under its project header.
-    if (!grouped && activeId) {
+    // belongs under its project header. Also suppressed when pinActiveToTop
+    // is false (grid mode) so tile-switching doesn't reorder the list.
+    if (pinActiveToTop && !grouped && activeId) {
       const active = matches.find((s) => s.id === activeId);
       if (active && matches[0]?.id !== activeId) {
         return [active, ...matches.filter((s) => s.id !== activeId)];
       }
     }
     return matches;
-  }, [sessions, projectFilter, search, activeId, grouped]);
+  }, [sessions, projectFilter, search, activeId, grouped, pinActiveToTop]);
 
   // Group filtered sessions by project basename when the toggle is on.
   const groupList = useMemo(() => {
