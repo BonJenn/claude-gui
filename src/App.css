@@ -859,6 +859,37 @@ body[data-resizing="true"] .grid-row-divider::before {
   box-shadow: 0 0 0 1px var(--accent-soft);
 }
 
+/* Attention states for unfocused grid tiles. Cleared when the user
+   focuses the tile (see LivePanel). Override the base `.active` outline
+   for the short window where a flash + active-highlight would overlap,
+   but `.active` wins because the user is already looking. */
+.grid-panel.attention-permission {
+  border-color: #e89849;
+  box-shadow: 0 0 0 1px #e8984980;
+  animation: grid-panel-flash 1.2s ease-in-out infinite;
+}
+
+.grid-panel.attention-completed {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 1px var(--ok);
+}
+
+.grid-panel.attention-error {
+  border-color: var(--err);
+  box-shadow: 0 0 0 1px var(--err);
+}
+
+@keyframes grid-panel-flash {
+  0%, 100% {
+    border-color: #e89849;
+    box-shadow: 0 0 0 1px #e8984980;
+  }
+  50% {
+    border-color: #e8984933;
+    box-shadow: 0 0 0 1px transparent;
+  }
+}
+
 .grid-panel-head {
   display: flex;
   align-items: center;
