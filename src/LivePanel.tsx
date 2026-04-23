@@ -20,6 +20,7 @@ import {
   EditableTitle,
   SESSION_TAIL_LIMIT,
   looksLikeYesNoQuestion,
+  notifyTurnComplete,
 } from "./App";
 
 // A self-contained live session. Each LivePanel owns its own subprocess,
@@ -369,6 +370,29 @@ export function LivePanel({
             isError: ev.is_error,
           },
         ]);
+        // Native notification when window isn't focused.
+        (() => {
+          let body = "";
+          const current = entries;
+          for (let i = current.length - 1; i >= 0; i--) {
+            const e = current[i];
+            if (e.kind === "assistant") {
+              for (const b of e.blocks) {
+                if (b.type === "text") {
+                  body = (b as TextBlock).text || "";
+                  break;
+                }
+              }
+              if (body) break;
+            }
+          }
+          if (!body) body = ev.is_error ? "turn ended with an error" : "turn complete";
+          void notifyTurnComplete({
+            title: title || "Claude",
+            body,
+            isError: !!ev.is_error,
+          });
+        })();
         const rawDenials = (ev as { permission_denials?: unknown })
           .permission_denials;
         if (Array.isArray(rawDenials) && rawDenials.length > 0) {
