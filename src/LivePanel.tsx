@@ -66,6 +66,9 @@ export function LivePanel({
     return [];
   });
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<
+    { id: string; path: string }[]
+  >([]);
   const [busy, setBusy] = useState(false);
   const [sessionOn, setSessionOn] = useState(false);
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
@@ -100,8 +103,34 @@ export function LivePanel({
   useEffect(() => {
     if (!pendingPermission && attention === "permission") setAttention(null);
   }, [pendingPermission, attention]);
+  // Listen for files dropped onto this tile. App's global drag-drop
+  // handler hit-tests the cursor position and dispatches a CustomEvent
+  // on the tile under the pointer; we pick it up here and grow the
+  // panel's own attachment list.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onDrop = (ev: Event) => {
+      const paths = (ev as CustomEvent<string[]>).detail;
+      if (!Array.isArray(paths) || paths.length === 0) return;
+      setAttachments((prev) => {
+        const existing = new Set(prev.map((a) => a.path));
+        const additions = paths
+          .filter((p) => !existing.has(p))
+          .map((p) => ({ id: randomId(), path: p }));
+        return additions.length === 0 ? prev : [...prev, ...additions];
+      });
+    };
+    el.addEventListener("claude-gui:drop-files", onDrop as EventListener);
+    return () =>
+      el.removeEventListener(
+        "claude-gui:drop-files",
+        onDrop as EventListener,
+      );
+  }, []);
   const streamingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
   // Tracks whether we've already notified the host that this panel's
   // subprocess reported its session id. Keeping this in a ref lets us
@@ -447,13 +476,19 @@ export function LivePanel({
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || busy) return;
+    if ((!text && attachments.length === 0) || busy) return;
+    const attachList = attachments.map((a) => `- ${a.path}`).join("\n");
+    const body =
+      attachments.length > 0
+        ? `${text || "(see attached files)"}\n\n[Attached files]\n${attachList}`
+        : text;
     setInput("");
-    setEntries((es) => [...es, { kind: "user", id: randomId(), text }]);
-    lastUserMessageRef.current = text;
+    setAttachments([]);
+    setEntries((es) => [...es, { kind: "user", id: randomId(), text: body }]);
+    lastUserMessageRef.current = body;
     setBusy(true);
     try {
-      await invoke("send_message", { panelId, text });
+      await invoke("send_message", { panelId, text: body });
     } catch (e) {
       setBusy(false);
       setEntries((es) => [
@@ -461,7 +496,7 @@ export function LivePanel({
         { kind: "system", id: randomId(), text: `send failed: ${e}` },
       ]);
     }
-  }, [input, busy, panelId]);
+  }, [input, busy, panelId, attachments]);
 
   // Restart this panel's subprocess in bypassPermissions mode and replay
   // the last user message. Used by the denial overlay's "allow & retry".
@@ -504,6 +539,7 @@ export function LivePanel({
 
   return (
     <div
+      ref={rootRef}
       className={`grid-panel live ${isActive ? "active" : ""} ${
         attention ? `attention-${attention}` : ""
       }`}
@@ -613,6 +649,30 @@ export function LivePanel({
         )}
       </div>
       <footer className="grid-panel-composer">
+        {attachments.length > 0 && (
+          <div className="attachments panel-attachments">
+            {attachments.map((a) => {
+              const name = a.path.split("/").pop() || a.path;
+              return (
+                <span key={a.id} className="attachment" title={a.path}>
+                  <span className="attachment-name">{name}</span>
+                  <button
+                    type="button"
+                    className="attachment-remove"
+                    onClick={() =>
+                      setAttachments((prev) =>
+                        prev.filter((x) => x.id !== a.id),
+                      )
+                    }
+                    aria-label="remove attachment"
+                  >
+                    ×
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -622,7 +682,7 @@ export function LivePanel({
               send();
             }
           }}
-          placeholder="message…  (Enter to send)"
+          placeholder="message…  (Enter to send; drop files on this tile to attach)"
           disabled={busy}
           rows={2}
         />
@@ -639,7 +699,7 @@ export function LivePanel({
             type="button"
             className="btn btn-send"
             onClick={send}
-            disabled={!input.trim()}
+            disabled={!input.trim() && attachments.length === 0}
           >
             send
           </button>
