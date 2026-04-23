@@ -80,12 +80,21 @@ async fn start_session(
         .arg("--include-partial-messages")
         .arg("--permission-mode").arg(&mode);
 
-    // Extend the CLI's directory sandbox to cover the whole home dir so
-    // claude can read/write anywhere the user typically works. Per-tool
-    // approval still goes through the permission prompt UI, so this isn't
-    // a silent bypass — it just stops the "sandboxed in another directory"
-    // dead-end for cross-project file access.
-    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+    // The CLI has a second security layer separate from --permission-mode:
+    // a directory sandbox that limits which paths tools can touch. By
+    // default that's just the cwd, which blocks cross-project access. We
+    // extend it based on the caller's intent:
+    //   - bypassPermissions: the user opted into "let claude do anything",
+    //     so we pass `--add-dir /` to remove the dir sandbox entirely.
+    //     Otherwise an "allow & retry" from a denial overlay wouldn't
+    //     actually unblock system paths like /etc or /tmp.
+    //   - any other mode: cover the whole home dir, which is where work
+    //     typically lives.
+    if mode == "bypassPermissions" {
+        cmd.arg("--add-dir").arg("/");
+    } else if let Some(home) =
+        std::env::var_os("HOME").and_then(|h| h.into_string().ok())
+    {
         cmd.arg("--add-dir").arg(home);
     }
 

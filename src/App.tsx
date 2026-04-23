@@ -320,6 +320,16 @@ function App() {
   );
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
+  // In `claude -p` mode, claude doesn't delegate permissions via
+  // control_request — it just auto-denies the tool and reports it in
+  // the result event's `permission_denials` array. We surface those so
+  // the user can flip the session to bypassPermissions and retry.
+  const [pendingDenials, setPendingDenials] = useState<
+    Array<{ tool_name: string; tool_input?: unknown }> | null
+  >(null);
+  // Remember the most recent user message so "allow and retry" can
+  // replay it after upgrading permission mode.
+  const lastUserMessageRef = useRef<string>("");
   const [dragOver, setDragOver] = useState(false);
   // Set when we detect the claude CLI is running with bad credentials
   // (expired OAuth token, stale API key). Renders a blocking modal that
@@ -967,6 +977,23 @@ function App() {
       if (ev.is_error) {
         setShowStderr(true);
       }
+      // claude -p auto-denies tool uses when the permission mode isn't
+      // bypassPermissions; the denials show up here rather than as a
+      // live control_request. Surface them so the user can approve
+      // retroactively (flip to bypass + retry).
+      const rawDenials = (ev as { permission_denials?: unknown })
+        .permission_denials;
+      if (Array.isArray(rawDenials) && rawDenials.length > 0) {
+        const parsed = rawDenials
+          .filter(
+            (d): d is { tool_name: string; tool_input?: unknown } =>
+              typeof d === "object" &&
+              d !== null &&
+              typeof (d as { tool_name?: unknown }).tool_name === "string",
+          )
+          .map((d) => ({ tool_name: d.tool_name, tool_input: d.tool_input }));
+        if (parsed.length > 0) setPendingDenials(parsed);
+      }
       return;
     }
 
@@ -1426,6 +1453,7 @@ function App() {
       ...es,
       { kind: "user", id: randomId(), text: body },
     ]);
+    lastUserMessageRef.current = body;
     setBusy(true);
     setStuckToBottom(true);
     setHasNewBelow(false);
@@ -1732,6 +1760,57 @@ function App() {
                 await setPermissionModeOnPanel("main", "bypassPermissions");
                 setPermissionMode("bypassPermissions");
                 setPendingPermission(null);
+              }}
+            />
+          )}
+          {pendingDenials && (
+            <PermissionDenialOverlay
+              denials={pendingDenials}
+              onDismiss={() => setPendingDenials(null)}
+              onAllowAndRetry={async () => {
+                // Upgrading mid-session via set_permission_mode doesn't
+                // re-run the denied tool — claude already emitted a
+                // `result` and is idle. Flip the mode + resend the last
+                // user message so claude retries with the new mode.
+                const resendText = lastUserMessageRef.current;
+                const sid = activeSessionId;
+                const useCwd = cwd;
+                setPendingDenials(null);
+                setPermissionMode("bypassPermissions");
+                try {
+                  await invoke("start_session", {
+                    panelId: "main",
+                    cwd: useCwd,
+                    permissionMode: "bypassPermissions",
+                    model: model || null,
+                    resumeId: sid || null,
+                  });
+                  setSessionOn(true);
+                  if (resendText) {
+                    setEntries((es) => [
+                      ...es,
+                      {
+                        kind: "user",
+                        id: randomId(),
+                        text: resendText,
+                      },
+                    ]);
+                    setBusy(true);
+                    await invoke("send_message", {
+                      panelId: "main",
+                      text: resendText,
+                    });
+                  }
+                } catch (e) {
+                  setEntries((es) => [
+                    ...es,
+                    {
+                      kind: "system",
+                      id: randomId(),
+                      text: `retry failed: ${e}`,
+                    },
+                  ]);
+                }
               }}
             />
           )}
@@ -3482,6 +3561,70 @@ function AuthErrorModal({
           </button>
           <button type="button" className="btn btn-primary" onClick={onQuit}>
             Quit app
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PermissionDenialOverlay({
+  denials,
+  onAllowAndRetry,
+  onDismiss,
+}: {
+  denials: Array<{ tool_name: string; tool_input?: unknown }>;
+  onAllowAndRetry: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="permission-overlay" role="alertdialog" aria-modal="true">
+      <div className="permission-card">
+        <div className="permission-prompt-title">
+          claude wanted to use{" "}
+          {denials.length === 1 ? (
+            <span className="permission-tool">{denials[0].tool_name}</span>
+          ) : (
+            <>
+              <span className="permission-tool">{denials.length} tools</span>{" "}
+              but the current permission mode blocked them
+            </>
+          )}
+          {denials.length === 1 ? " but the current permission mode blocked it" : ""}.
+        </div>
+        {denials.slice(0, 3).map((d, i) => {
+          const inputStr = (() => {
+            if (d.tool_input == null) return "";
+            try {
+              return typeof d.tool_input === "string"
+                ? d.tool_input
+                : JSON.stringify(d.tool_input, null, 2);
+            } catch {
+              return String(d.tool_input);
+            }
+          })();
+          return (
+            <pre key={i} className="permission-prompt-input">
+              <strong>{d.tool_name}</strong>
+              {inputStr ? `\n${inputStr.slice(0, 400)}` : ""}
+            </pre>
+          );
+        })}
+        {denials.length > 3 && (
+          <div className="hint" style={{ marginTop: 6 }}>
+            … and {denials.length - 3} more
+          </div>
+        )}
+        <div className="permission-prompt-actions">
+          <button type="button" className="btn btn-secondary" onClick={onDismiss}>
+            Dismiss
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onAllowAndRetry}
+          >
+            Allow all tools &amp; retry
           </button>
         </div>
       </div>
