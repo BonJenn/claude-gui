@@ -455,6 +455,12 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
     let mut total_cost: f64 = 0.0;
     let mut model = String::new();
     let mut permission_mode = String::new();
+    // Authoritative contextWindow reported by the CLI in each result
+    // event's `modelUsage` map. Indexed by model name so we can pick
+    // the main model's window at the end — sub-agents like Haiku have
+    // their own (smaller) window that shouldn't dominate the bar.
+    let mut context_window_by_model: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -545,6 +551,25 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
                 if let Some(cost) = v.get("total_cost_usd").and_then(|x| x.as_f64()) {
                     total_cost = cost;
                 }
+                if let Some(usage) =
+                    v.get("modelUsage").and_then(|x| x.as_object())
+                {
+                    for (model_name, info) in usage {
+                        if let Some(cw) = info
+                            .get("contextWindow")
+                            .and_then(|x| x.as_u64())
+                        {
+                            if cw > 0 {
+                                let entry = context_window_by_model
+                                    .entry(model_name.clone())
+                                    .or_insert(0);
+                                if cw > *entry {
+                                    *entry = cw;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -564,7 +589,17 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         trimmed
     };
 
-    let context_limit = context_limit_for(&model, max_context_seen);
+    // Prefer the CLI's own contextWindow report for the main model.
+    // Fall back to the max window reported across any model used in
+    // the session (covers older sessions that never recorded the
+    // main model's usage). Only if neither is available do we drop
+    // back to the model-name heuristic.
+    let context_limit = context_window_by_model
+        .get(&model)
+        .copied()
+        .or_else(|| context_window_by_model.values().max().copied())
+        .filter(|&cw| cw > 0)
+        .unwrap_or_else(|| context_limit_for(&model, max_context_seen));
 
     Some(SessionInfo {
         id,
