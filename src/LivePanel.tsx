@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { compileMarkdown } from "./markdown";
+import { notifyErr } from "./toast";
 import {
   type Block,
   type Entry,
@@ -478,6 +479,7 @@ export function LivePanel({
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
         ]);
+        notifyErr(`panel ${panelId.slice(0, 8)} failed to start`)(e);
       }
     })();
     return () => {
@@ -560,6 +562,7 @@ export function LivePanel({
         ...es,
         { kind: "system", id: randomId(), text: `send failed: ${e}` },
       ]);
+      notifyErr("send failed")(e);
     }
   }, [input, busy, panelId, attachments]);
 
@@ -579,6 +582,7 @@ export function LivePanel({
           ...es,
           { kind: "system", id: randomId(), text: `send failed: ${e}` },
         ]);
+        notifyErr("send failed")(e);
       }
     },
     [busy, panelId],
@@ -612,6 +616,7 @@ export function LivePanel({
         ...es,
         { kind: "system", id: randomId(), text: `retry failed: ${e}` },
       ]);
+      notifyErr("retry failed")(e);
     }
   }, [panelId, initialCwd, initialModel, sessionId, initialSessionId]);
 
