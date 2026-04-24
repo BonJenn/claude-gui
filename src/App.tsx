@@ -955,6 +955,18 @@ function App() {
     }
   }, []);
 
+  const reorderGridPanels = useCallback((fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setGridPanels((prev) => {
+      const i = prev.indexOf(fromId);
+      const j = prev.indexOf(toId);
+      if (i < 0 || j < 0) return prev;
+      const next = prev.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }, []);
+
   const renameSession = useCallback(
     async (id: string, sessionCwd: string, title: string) => {
       const trimmed = title.trim();
@@ -2375,6 +2387,7 @@ function App() {
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
             onRename={renameSession}
+            onReorder={reorderGridPanels}
             newPanelCwds={newPanelCwds}
             newPanelWorktree={newPanelWorktree}
             onSessionStarted={(panelId, sid) => {
@@ -4347,6 +4360,7 @@ function LiveGrid({
   onSelect,
   onRemove,
   onRename,
+  onReorder,
   onSessionStarted,
   onExpand,
 }: {
@@ -4366,6 +4380,7 @@ function LiveGrid({
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
+  onReorder: (fromId: string, toId: string) => void;
   onSessionStarted: (panelId: string, sessionId: string) => void;
   onExpand: (sessionId: string, cwd: string) => void;
 }) {
@@ -4495,6 +4510,13 @@ function LiveGrid({
     [colWeightsByCount],
   );
 
+  // Drag state for panel reordering. `dragId` is the panel currently
+  // being dragged; `overId` is the panel it's hovering over and would
+  // swap with on drop. Both clear on dragend/drop or when the drag
+  // leaves every tile.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+
   if (panels.length === 0) {
     return (
       <section className="grid-transcripts empty-grid">
@@ -4590,6 +4612,38 @@ function LiveGrid({
             onRename={onRename}
             onSessionStarted={onSessionStarted}
             onExpand={onExpand}
+            dragging={dragId === id}
+            dragOver={overId === id && dragId !== null && dragId !== id}
+            onHandleDragStart={(e) => {
+              e.dataTransfer.setData("text/plain", id);
+              e.dataTransfer.effectAllowed = "move";
+              setDragId(id);
+            }}
+            onHandleDragEnd={() => {
+              setDragId(null);
+              setOverId(null);
+            }}
+            onPanelDragOver={(e) => {
+              if (!dragId || dragId === id) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              if (overId !== id) setOverId(id);
+            }}
+            onPanelDragLeave={(e) => {
+              // Ignore leaves into descendants — only clear when the
+              // pointer actually exits the tile.
+              const tgt = e.currentTarget as HTMLElement;
+              const related = e.relatedTarget as Node | null;
+              if (related && tgt.contains(related)) return;
+              if (overId === id) setOverId(null);
+            }}
+            onPanelDrop={(e) => {
+              e.preventDefault();
+              const from = e.dataTransfer.getData("text/plain") || dragId;
+              setDragId(null);
+              setOverId(null);
+              if (from && from !== id) onReorder(from, id);
+            }}
           />
         );
       })}
