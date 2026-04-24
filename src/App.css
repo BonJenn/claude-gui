@@ -835,7 +835,42 @@ input:disabled, select:disabled, textarea:disabled {
 }
 
 .grid-transcripts.live {
+  /* The live grid is now a flex column so we can park a narrow
+     "+ new panel" strip underneath the main tile grid instead of
+     giving it a whole tile's worth of height. */
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 10px;
+  gap: 8px;
+}
+
+.grid-panels-area {
+  display: grid;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
   position: relative;
+}
+
+.grid-add-strip {
+  flex: 0 0 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.grid-add-strip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .grid-row-divider {
