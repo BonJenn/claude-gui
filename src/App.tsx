@@ -5247,18 +5247,33 @@ function LiveGrid({
       </section>
     );
   }
-  const tileCount = Math.max(1, Math.min(6, panels.length + (panels.length < 6 ? 1 : 0)));
-  const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
-  const rowCount = Math.ceil(tileCount / columns);
+  // Columns are chosen by panel count alone (the add-tile no longer
+  // occupies a full column slot when the panel row would otherwise be
+  // complete). Rows follow: ceil(panels / columns).
+  const columns =
+    panels.length === 0 ? 1 : panels.length <= 4 ? 2 : 3;
+  const rowCount = Math.max(1, Math.ceil(panels.length / columns));
+  // If the panels fill every column of the last row, put the + new
+  // panel button into a narrow full-width strip below the grid so it
+  // doesn't swallow a whole tile's worth of height. Otherwise it
+  // takes the remaining slot in the last row of the grid.
+  const addAsStrip =
+    panels.length > 0 &&
+    panels.length < 6 &&
+    panels.length % columns === 0;
+  const addInGrid = panels.length > 0 && panels.length < 6 && !addAsStrip;
   const showRowDivider = rowCount >= 2;
-  // Default: when the bottom row is mostly just the add-tile button
-  // (≤ 2 actual panels in a 2-col layout), bias the top row to 3/4 of
-  // the height so the working panels aren't squeezed. Once the user
-  // drags the divider, their value wins.
-  const defaultTopFraction = panels.length <= 2 ? 0.75 : 0.5;
+  const defaultTopFraction = 0.5;
   const effectiveTopFraction = topFraction ?? defaultTopFraction;
+  // Equal-height rows by default; the divider only rebalances the
+  // first two. (With our current max of 2 rows this degenerates to
+  // `${frac}fr ${1-frac}fr`.)
   const gridTemplateRows = showRowDivider
-    ? `${effectiveTopFraction}fr ${1 - effectiveTopFraction}fr`
+    ? Array.from({ length: rowCount }, (_, i) =>
+        i === 0
+          ? `${effectiveTopFraction}fr`
+          : `${(1 - effectiveTopFraction) / (rowCount - 1)}fr`,
+      ).join(" ")
     : undefined;
   const colWeights =
     (columns > 1 && colWeightsByCount[columns]?.length === columns
@@ -5279,14 +5294,15 @@ function LiveGrid({
     }
   }
   return (
-    <section
-      ref={containerRef}
-      className="grid-transcripts live"
-      style={{
-        gridTemplateColumns,
-        gridTemplateRows,
-      }}
-    >
+    <section className="grid-transcripts live">
+      <div
+        ref={containerRef}
+        className="grid-panels-area"
+        style={{
+          gridTemplateColumns,
+          gridTemplateRows,
+        }}
+      >
       {panels.map((id) => {
         const info = sessions.find((s) => s.id === id);
         const isNewPanel = id in newPanelCwds;
@@ -5362,7 +5378,7 @@ function LiveGrid({
           />
         );
       })}
-      {panels.length < 6 && (
+      {addInGrid && (
         <button
           type="button"
           className="grid-add-tile"
@@ -5396,6 +5412,18 @@ function LiveGrid({
           title="drag to resize columns"
         />
       ))}
+      </div>
+      {addAsStrip && (
+        <button
+          type="button"
+          className="grid-add-strip"
+          onClick={onAddPanel}
+          title="add panel"
+        >
+          <span className="grid-add-plus">+</span>
+          <span className="grid-add-label">new panel</span>
+        </button>
+      )}
     </section>
   );
 }
