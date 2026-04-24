@@ -801,7 +801,7 @@ function App() {
               const tile = el.closest(".grid-panel.live");
               if (tile) {
                 tile.dispatchEvent(
-                  new CustomEvent<string[]>("claude-gui:drop-files", {
+                  new CustomEvent<string[]>("blackcrab:drop-files", {
                     detail: paths,
                   }),
                 );
@@ -2175,7 +2175,7 @@ function App() {
       />
       <main className="app">
         <header className="topbar">
-          <div className="brand">Claude GUI</div>
+          <div className="brand">Blackcrab</div>
           <div className="controls">
             <label className="field">
               <span>cwd</span>

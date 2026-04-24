@@ -1,4 +1,4 @@
-# Claude GUI
+# Blackcrab
 
 ## Git conventions
 

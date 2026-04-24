@@ -134,10 +134,10 @@ export function LivePanel({
         return additions.length === 0 ? prev : [...prev, ...additions];
       });
     };
-    el.addEventListener("claude-gui:drop-files", onDrop as EventListener);
+    el.addEventListener("blackcrab:drop-files", onDrop as EventListener);
     return () =>
       el.removeEventListener(
-        "claude-gui:drop-files",
+        "blackcrab:drop-files",
         onDrop as EventListener,
       );
   }, []);

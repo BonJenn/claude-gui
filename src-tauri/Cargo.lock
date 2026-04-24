@@ -256,6 +256,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "blackcrab"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,23 +477,6 @@ dependencies = [
  "num-traits",
  "serde",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "claude-gui"
-version = "0.1.0"
-dependencies = [
- "libc",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tokio",
- "url",
 ]
 
 [[package]]
