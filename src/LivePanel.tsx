@@ -408,6 +408,7 @@ export function LivePanel({
             const e = current[i];
             if (e.kind === "assistant") {
               for (const b of e.blocks) {
+                if (!b) continue;
                 if (b.type === "text") {
                   body = (b as TextBlock).text || "";
                   break;
@@ -791,6 +792,9 @@ export function LivePanel({
             if (e.kind === "assistant") {
               for (let j = e.blocks.length - 1; j >= 0; j--) {
                 const b = e.blocks[j];
+                // `blocks` can be sparse while streaming writes to
+                // specific indices — undefined slots must be skipped.
+                if (!b) continue;
                 if (b.type === "text") {
                   lastText = (b as TextBlock).text || "";
                   break;
