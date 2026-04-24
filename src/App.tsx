@@ -1006,6 +1006,59 @@ function App() {
     refreshSessions();
   }, [refreshSessions]);
 
+  // Prune gridPanels entries that no longer correspond to a real session
+  // on disk and aren't a pending "new:..." placeholder either. Happens
+  // when the user deletes a session file externally or when a stale id
+  // made it into localStorage from a previous version.
+  //
+  // A hydration race would wipe valid pins if we pruned on the first
+  // miss (list_sessions sometimes takes a tick to return the session
+  // we just started), so require two consecutive misses. Entries that
+  // reappear reset their miss count.
+  const staleMissCountRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (sessionsLoading) return; // don't prune while the list is mid-fetch
+    if (gridPanels.length === 0) return;
+    const misses = staleMissCountRef.current;
+    const hydrated = new Set(sessions.map((s) => s.id));
+    const toDrop: string[] = [];
+    const stillUnknown = new Map<string, number>();
+    for (const id of gridPanels) {
+      if (id in newPanelCwds) {
+        misses.delete(id);
+        continue;
+      }
+      if (hydrated.has(id)) {
+        misses.delete(id);
+        continue;
+      }
+      const n = (misses.get(id) ?? 0) + 1;
+      if (n >= 2) {
+        toDrop.push(id);
+      } else {
+        stillUnknown.set(id, n);
+      }
+    }
+    // Keep the ref in sync: only entries still pending a decision.
+    staleMissCountRef.current = stillUnknown;
+    if (toDrop.length === 0) return;
+    setGridPanels((prev) => prev.filter((p) => !toDrop.includes(p)));
+    setPanelSessionIds((m) => {
+      let changed = false;
+      const next = { ...m };
+      for (const id of toDrop) {
+        if (id in next) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : m;
+    });
+    setSelectedGridPanelId((cur) =>
+      cur && toDrop.includes(cur) ? null : cur,
+    );
+  }, [sessions, sessionsLoading, gridPanels, newPanelCwds]);
+
   useEffect(() => {
     refreshBranches(cwd);
     // Warm the GitHub repo cache for this cwd so streaming content_block_stop
