@@ -22,6 +22,7 @@ import {
   respondPermission,
   type PermissionRequest,
 } from "./LivePanel";
+import { subscribeToasts, type Toast, notifyErr } from "./toast";
 import "./App.css";
 
 // Hoisted so they're stable across renders — creating them fresh each time
@@ -949,7 +950,7 @@ function App() {
       const list = await invoke<SessionInfo[]>("list_sessions");
       setSessions(list);
     } catch (e) {
-      console.error("list_sessions failed", e);
+      notifyErr("failed to load sessions")(e);
     } finally {
       setSessionsLoading(false);
     }
@@ -981,7 +982,7 @@ function App() {
           prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s)),
         );
       } catch (e) {
-        console.error("set_session_title failed", e);
+        notifyErr("failed to rename session")(e);
       }
     },
     [],
@@ -1645,6 +1646,7 @@ function App() {
         ...es,
         { kind: "system", id: randomId(), text: `failed to switch: ${e}` },
       ]);
+      notifyErr(`failed to switch to ${branch}`)(e);
     } finally {
       setSwitchingBranch(false);
     }
@@ -1788,6 +1790,7 @@ function App() {
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
         ]);
+        notifyErr("failed to start session")(e);
       }
     } finally {
       if (isLatest()) switchingSessionRef.current = false;
@@ -1831,6 +1834,7 @@ function App() {
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
         ]);
+        notifyErr("failed to start session")(e);
         return;
       }
     }
@@ -1850,6 +1854,7 @@ function App() {
         ...es,
         { kind: "system", id: randomId(), text: `send failed: ${e}` },
       ]);
+      notifyErr("send failed")(e);
     }
   }
 
@@ -1872,6 +1877,7 @@ function App() {
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
         ]);
+        notifyErr("failed to start session")(e);
         return;
       }
     }
@@ -1901,6 +1907,7 @@ function App() {
     } catch (e) {
       setBusy(false);
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
+      notifyErr("send failed")(e);
     }
   }
 
@@ -2012,6 +2019,7 @@ function App() {
 
   return (
     <div className="root">
+      <ToastHost />
       {authErrorSeen && (
         <AuthErrorModal
           onDismiss={() => setAuthErrorSeen(false)}
@@ -2104,7 +2112,7 @@ function App() {
                           content: md,
                         });
                       } catch (e) {
-                        console.error("export failed:", e);
+                        notifyErr("export failed")(e);
                       }
                     },
                   },
@@ -2336,7 +2344,7 @@ function App() {
                     content: md,
                   });
                 } catch (e) {
-                  console.error("export failed:", e);
+                  notifyErr("export failed")(e);
                 }
               }}
               title="export this conversation as a markdown file"
@@ -2846,6 +2854,38 @@ function App() {
           />
         </>
       )}
+    </div>
+  );
+}
+
+// Top-right stack of transient notifications. Subscribes to the global
+// toast bus; each toast auto-dismisses after ~5s. Click to dismiss now.
+function ToastHost() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  useEffect(() => {
+    return subscribeToasts((t) => {
+      setToasts((prev) => [...prev, t]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((x) => x.id !== t.id));
+      }, 5000);
+    });
+  }, []);
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-host" aria-live="polite" aria-atomic="false">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`toast toast-${t.kind}`}
+          role="status"
+          onClick={() =>
+            setToasts((prev) => prev.filter((x) => x.id !== t.id))
+          }
+          title="click to dismiss"
+        >
+          {t.msg}
+        </div>
+      ))}
     </div>
   );
 }
