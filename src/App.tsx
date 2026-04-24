@@ -482,10 +482,91 @@ function App() {
   } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
-  // A single PTY session backs the terminal panel. We keep the same id
-  // across toggles so unmount kills the PTY and a later toggle spawns
-  // a fresh one.
-  const terminalIdRef = useRef<string>(`term-${randomId()}`);
+  // Per-terminal-tab state. Each entry's id becomes its PTY id; tabs
+  // are unmounted when closed, killing their shells.
+  const [terminalTabs, setTerminalTabs] = useState<
+    { id: string; label: string }[]
+  >(() => [{ id: `term-${randomId()}`, label: "1" }]);
+  const [activeTerminalId, setActiveTerminalId] = useState<string>(
+    () => `term-${randomId()}`,
+  );
+  // Keep activeTerminalId valid when tabs change.
+  useEffect(() => {
+    if (terminalTabs.length === 0) return;
+    if (!terminalTabs.find((t) => t.id === activeTerminalId)) {
+      setActiveTerminalId(terminalTabs[0].id);
+    }
+  }, [terminalTabs, activeTerminalId]);
+  // Initialize active to the first tab on first mount.
+  useEffect(() => {
+    setActiveTerminalId(terminalTabs[0]?.id ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [terminalHeight, setTerminalHeight] = useState<number>(() => {
+    const saved = localStorage.getItem("terminalHeight");
+    const n = saved ? parseInt(saved, 10) : NaN;
+    return Number.isFinite(n) ? Math.max(120, Math.min(900, n)) : 320;
+  });
+  useEffect(() => {
+    localStorage.setItem("terminalHeight", String(terminalHeight));
+  }, [terminalHeight]);
+  const onTerminalResizerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = terminalHeight;
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+      document.body.dataset.resizing = "true";
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;z-index:99999;cursor:row-resize;";
+      document.body.appendChild(overlay);
+      const move = (ev: PointerEvent) => {
+        const dy = startY - ev.clientY;
+        setTerminalHeight(Math.max(120, Math.min(900, startH + dy)));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        delete document.body.dataset.resizing;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    },
+    [terminalHeight],
+  );
+  function addTerminalTab() {
+    const id = `term-${randomId()}`;
+    setTerminalTabs((prev) => {
+      // Pick the next unused integer so fresh tabs default to a label
+      // that doesn't collide with anything the user has renamed.
+      const used = new Set(prev.map((t) => t.label));
+      let n = prev.length + 1;
+      while (used.has(String(n))) n++;
+      return [...prev, { id, label: String(n) }];
+    });
+    setActiveTerminalId(id);
+  }
+  function closeTerminalTab(id: string) {
+    // Preserve user-chosen labels on the remaining tabs — no renumber.
+    setTerminalTabs((prev) => prev.filter((t) => t.id !== id));
+  }
+  function renameTerminalTab(id: string, label: string) {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    setTerminalTabs((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, label: trimmed } : t)),
+    );
+  }
+  const [editingTerminalTabId, setEditingTerminalTabId] = useState<
+    string | null
+  >(null);
   // Remember the most recent user message so "allow and retry" can
   // replay it after upgrading permission mode.
   const lastUserMessageRef = useRef<string>("");
@@ -2428,12 +2509,88 @@ function App() {
         </section>
 
         {terminalOpen && (
-          <div className="terminal-panel">
+          <div
+            className="terminal-panel"
+            style={{ height: `${terminalHeight}px` }}
+          >
+            <div
+              className="terminal-resizer"
+              onPointerDown={onTerminalResizerDown}
+              role="separator"
+              aria-orientation="horizontal"
+              title="drag to resize terminal"
+            />
             <div className="terminal-panel-head">
-              <span className="terminal-panel-title">
-                terminal
-                <span className="terminal-panel-cwd">{cwd}</span>
-              </span>
+              <div className="terminal-tabs" role="tablist">
+                {terminalTabs.map((t) => (
+                  <div
+                    key={t.id}
+                    role="tab"
+                    aria-selected={t.id === activeTerminalId}
+                    className={`terminal-tab ${
+                      t.id === activeTerminalId ? "active" : ""
+                    }`}
+                    onClick={() => setActiveTerminalId(t.id)}
+                    title="double-click to rename"
+                  >
+                    {editingTerminalTabId === t.id ? (
+                      <input
+                        autoFocus
+                        className="terminal-tab-edit"
+                        defaultValue={t.label}
+                        onClick={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setEditingTerminalTabId(null);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          renameTerminalTab(t.id, e.target.value);
+                          setEditingTerminalTabId(null);
+                        }}
+                      />
+                    ) : (
+                      <span
+                        className="terminal-tab-label"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingTerminalTabId(t.id);
+                        }}
+                      >
+                        {t.label}
+                      </span>
+                    )}
+                    {terminalTabs.length > 1 && (
+                      <span
+                        className="terminal-tab-close"
+                        role="button"
+                        aria-label="close tab"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTerminalTab(t.id);
+                        }}
+                      >
+                        ×
+                      </span>
+                    )}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="terminal-tab-add"
+                  onClick={addTerminalTab}
+                  title="new terminal tab"
+                  aria-label="new terminal tab"
+                >
+                  +
+                </button>
+              </div>
+              <span className="terminal-panel-cwd">{cwd}</span>
               <button
                 type="button"
                 className="grid-panel-close"
@@ -2443,11 +2600,22 @@ function App() {
                 ×
               </button>
             </div>
-            <TerminalPanel
-              terminalId={terminalIdRef.current}
-              cwd={cwd}
-              visible={terminalOpen}
-            />
+            <div className="terminal-panel-slots">
+              {terminalTabs.map((t) => (
+                <div
+                  key={t.id}
+                  className={`terminal-slot ${
+                    t.id === activeTerminalId ? "active" : "hidden"
+                  }`}
+                >
+                  <TerminalPanel
+                    terminalId={t.id}
+                    cwd={cwd}
+                    visible={t.id === activeTerminalId}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
