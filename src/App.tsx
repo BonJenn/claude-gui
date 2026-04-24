@@ -153,6 +153,41 @@ export const REPLAY_SKIP = new Set([
 // rendering is essentially free on click.
 export const SESSION_TAIL_LIMIT = 200;
 
+// gridPanels holds two kinds of entries: real session ids (for sidebar-
+// pinned tiles) and "new:uuid:ts" placeholders (for tiles created via
+// "+ new panel"). Once a placeholder's subprocess reports its real
+// session id, the mapping lives in panelSessionIds — we keep the
+// placeholder as the React key so the LivePanel doesn't remount.
+//
+// These two helpers centralize the "which session does this panel
+// represent?" / "is this session already pinned in the grid?" queries
+// so call sites don't have to know the placeholder convention.
+
+/** Resolve a panel key to the session id it represents, or undefined
+ *  if the panel is a placeholder whose subprocess hasn't reported yet. */
+export function resolvePanelSession(
+  panelId: string,
+  panelSessionIds: Record<string, string>,
+): string | undefined {
+  if (!panelId.startsWith("new:")) return panelId;
+  return panelSessionIds[panelId];
+}
+
+/** Return the panel key whose resolved session id matches `sid`, or
+ *  undefined if no panel in the grid represents that session. Checks
+ *  both direct entries and placeholder mappings so dup detection works
+ *  whether the tile was pinned from the sidebar or started via +new. */
+export function findPanelForSession(
+  sid: string,
+  panels: string[],
+  panelSessionIds: Record<string, string>,
+): string | undefined {
+  for (const p of panels) {
+    if (resolvePanelSession(p, panelSessionIds) === sid) return p;
+  }
+  return undefined;
+}
+
 export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -749,7 +784,9 @@ function App() {
   // looking at. Nothing here touches the main-session subprocess.
   useEffect(() => {
     if (!gridMode || !selectedGridPanelId) return;
-    const realId = panelSessionIds[selectedGridPanelId] || selectedGridPanelId;
+    const realId =
+      resolvePanelSession(selectedGridPanelId, panelSessionIds) ??
+      selectedGridPanelId;
     const info = sessions.find((s) => s.id === realId);
     if (info) {
       if (info.cwd) setCwd(info.cwd);
@@ -2196,9 +2233,7 @@ function App() {
         activeId={
           gridMode
             ? selectedGridPanelId
-              ? selectedGridPanelId.startsWith("new:")
-                ? panelSessionIds[selectedGridPanelId]
-                : selectedGridPanelId
+              ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
               : undefined
             : activeSessionId
         }
@@ -2213,12 +2248,13 @@ function App() {
             //   * if the grid is full → replace the selected panel (or last)
             // "In the grid" means either a direct entry matching `id`, or
             // a "new:..." placeholder whose subprocess has reported `id`
-            // as its real session (tracked in panelSessionIds). Without
-            // this second check we'd add a duplicate tile for the same
-            // session.
-            const existingKey = gridPanels.includes(id)
-              ? id
-              : gridPanels.find((p) => panelSessionIds[p] === id);
+            // as its real session. findPanelForSession handles both
+            // cases so we don't double-add a tile for the same session.
+            const existingKey = findPanelForSession(
+              id,
+              gridPanels,
+              panelSessionIds,
+            );
             if (existingKey) {
               setSelectedGridPanelId(existingKey);
               return;
