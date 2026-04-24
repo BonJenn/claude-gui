@@ -836,6 +836,96 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Grid-scoped keyboard shortcuts. Only fire when gridMode is on and
+  // focus isn't captured by an editable (composer, title input, etc.),
+  // so typing "1" into a message body doesn't jump panels.
+  //   ⌘1..6 / Ctrl+1..6  → focus panel N (1-indexed)
+  //   ⌘⇧W / Ctrl+⇧W      → close focused panel (⌘W alone collides with
+  //                        macOS's "close window" menu item)
+  //   ⌘⇧D / Ctrl+⇧D      → duplicate focused panel (new tile in same cwd)
+  useEffect(() => {
+    if (!gridMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey && !e.ctrlKey) return;
+      const tgt = e.target as HTMLElement | null;
+      if (
+        tgt &&
+        (tgt.tagName === "INPUT" ||
+          tgt.tagName === "TEXTAREA" ||
+          tgt.isContentEditable)
+      ) {
+        return;
+      }
+      if (gridPanels.length === 0) return;
+
+      if (/^[1-6]$/.test(e.key)) {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < gridPanels.length) {
+          e.preventDefault();
+          setSelectedGridPanelId(gridPanels[idx]);
+        }
+        return;
+      }
+
+      if (e.shiftKey && (e.key === "w" || e.key === "W")) {
+        if (!selectedGridPanelId) return;
+        e.preventDefault();
+        const id = selectedGridPanelId;
+        setGridPanels((prev) => prev.filter((x) => x !== id));
+        setNewPanelCwds((m) => {
+          if (!(id in m)) return m;
+          const next = { ...m };
+          delete next[id];
+          return next;
+        });
+        setNewPanelWorktree((m) => {
+          if (!(id in m)) return m;
+          const next = { ...m };
+          delete next[id];
+          return next;
+        });
+        setPanelSessionIds((m) => {
+          if (!(id in m)) return m;
+          const next = { ...m };
+          delete next[id];
+          return next;
+        });
+        return;
+      }
+
+      if (e.shiftKey && (e.key === "d" || e.key === "D")) {
+        if (!selectedGridPanelId) return;
+        if (gridPanels.length >= 6) return;
+        // Duplicate reuses the focused panel's cwd + worktree flag so the
+        // new tile starts in the same project without a dir prompt.
+        // Always a fresh session (no resume_id) — single-writer would
+        // reject attaching a second subprocess to the same sid anyway.
+        const info = sessions.find((s) => s.id === selectedGridPanelId);
+        const sourceCwd =
+          newPanelCwds[selectedGridPanelId] ?? info?.cwd ?? cwd;
+        if (!sourceCwd) return;
+        e.preventDefault();
+        const key = `new:${randomId()}:${Date.now()}`;
+        setNewPanelCwds((m) => ({ ...m, [key]: sourceCwd }));
+        if (newPanelWorktree[selectedGridPanelId]) {
+          setNewPanelWorktree((m) => ({ ...m, [key]: true }));
+        }
+        setGridPanels((prev) => [...prev, key]);
+        setSelectedGridPanelId(key);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    gridMode,
+    gridPanels,
+    selectedGridPanelId,
+    sessions,
+    newPanelCwds,
+    newPanelWorktree,
+    cwd,
+  ]);
+
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
   useEffect(() => {
