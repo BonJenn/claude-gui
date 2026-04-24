@@ -2138,12 +2138,22 @@ function App() {
             //   * if it's already in the grid → focus it
             //   * if there's an empty slot → append (don't touch selection)
             //   * if the grid is full → replace the selected panel (or last)
-            if (gridPanels.includes(id)) {
-              setSelectedGridPanelId(id);
+            // "In the grid" means either a direct entry matching `id`, or
+            // a "new:..." placeholder whose subprocess has reported `id`
+            // as its real session (tracked in panelSessionIds). Without
+            // this second check we'd add a duplicate tile for the same
+            // session.
+            const existingKey = gridPanels.includes(id)
+              ? id
+              : gridPanels.find((p) => panelSessionIds[p] === id);
+            if (existingKey) {
+              setSelectedGridPanelId(existingKey);
               return;
             }
             if (gridPanels.length < 6) {
-              setGridPanels((prev) => [...prev, id]);
+              setGridPanels((prev) =>
+                prev.includes(id) ? prev : [...prev, id],
+              );
               setSelectedGridPanelId(id);
               return;
             }
