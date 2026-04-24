@@ -1139,6 +1139,45 @@ fn set_session_title(session_id: String, cwd: String, title: String) -> Result<(
     Ok(())
 }
 
+/// Move a session's JSONL into a sibling `.trash/` so it disappears
+/// from the sidebar but stays recoverable. Refuses if the session is
+/// currently owned by a live panel — the user should close that panel
+/// first so the subprocess isn't writing to a moved file.
+#[tauri::command]
+async fn delete_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    cwd: String,
+) -> Result<(), String> {
+    {
+        let owners = state.session_owners.lock().await;
+        if let Some(owner) = owners.get(&session_id) {
+            return Err(format!(
+                "session is still open in panel {} — close it first",
+                owner
+            ));
+        }
+    }
+    let path = session_path(&session_id, &cwd)
+        .ok_or_else(|| "no HOME".to_string())?;
+    if !path.exists() {
+        return Err("session file not found".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "session file has no parent dir".to_string())?;
+    let trash = parent.join(".trash");
+    fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+    let stamp = chrono_now_iso().replace(':', "-").replace('.', "-");
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{}.jsonl", session_id));
+    let target = trash.join(format!("{}.{}", base, stamp));
+    fs::rename(&path, &target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn chrono_now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now()
@@ -1236,6 +1275,7 @@ pub fn run() {
             load_session_tail,
             git_remote_url,
             set_session_title,
+            delete_session,
             write_text_file,
             list_tracked_files,
             search_sessions,
