@@ -28,6 +28,10 @@ struct AppState {
     // panel_id. In single-panel mode the frontend uses the literal "main".
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     terminals: Arc<StdMutex<HashMap<String, Terminal>>>,
+    // Session ownership: session_id -> panel_id that currently has a live
+    // subprocess resuming it. Enforces one writer per session file so two
+    // panels can't both append to the same JSONL and diverge.
+    session_owners: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -79,6 +83,22 @@ async fn start_session(
     let mut guard = state.sessions.lock().await;
     if let Some(mut s) = guard.remove(&panel_id) {
         let _ = s.child.start_kill();
+    }
+
+    // Single-writer gate: if we're about to resume a session id, make sure
+    // no other live panel is already attached to it. The prior subprocess
+    // for this panel (killed above) held any ownership for this panel_id
+    // so a restart-same-session on the same panel is still allowed.
+    if let Some(rid) = resume_id.as_deref().filter(|s| !s.is_empty()) {
+        let owners = state.session_owners.lock().await;
+        if let Some(other) = owners.get(rid) {
+            if other != &panel_id {
+                return Err(format!(
+                    "session {} is already open in panel {} — close it there first",
+                    rid, other
+                ));
+            }
+        }
     }
 
     let mode = permission_mode.unwrap_or_else(|| "bypassPermissions".to_string());
@@ -176,13 +196,38 @@ async fn start_session(
 
     let app_out = app.clone();
     let pid_out = panel_id.clone();
+    let owners_out = state.session_owners.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
+        let mut claimed: Option<String> = None;
         while let Ok(Some(line)) = lines.next_line().await {
+            // Claim ownership of the session id on the first init event
+            // that carries one. Cheap substring check before a full JSON
+            // parse — session_id only appears on a handful of event types.
+            if claimed.is_none() && line.contains("\"session_id\"") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(sid) =
+                        v.get("session_id").and_then(|x| x.as_str())
+                    {
+                        let mut owners = owners_out.lock().await;
+                        owners.insert(sid.to_string(), pid_out.clone());
+                        claimed = Some(sid.to_string());
+                    }
+                }
+            }
             let _ = app_out.emit(
                 "claude-event",
                 serde_json::json!({ "panel_id": pid_out, "line": line }),
             );
+        }
+        // Release ownership once the subprocess's stdout closes (claude
+        // has exited). If another panel had already stolen the claim,
+        // only drop it if it still points at us.
+        if let Some(sid) = claimed {
+            let mut owners = owners_out.lock().await;
+            if owners.get(&sid).map(|p| p == &pid_out).unwrap_or(false) {
+                owners.remove(&sid);
+            }
         }
         let _ = app_out.emit("claude-done", serde_json::json!({ "panel_id": pid_out }));
     });
@@ -457,6 +502,12 @@ async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<()
     if let Some(mut s) = guard.remove(&panel_id) {
         let _ = s.child.start_kill();
     }
+    // The stdout-reader's own cleanup already drops ownership once
+    // claude's stdout closes, but killing via start_kill races that
+    // close so we release eagerly here too to unblock the next
+    // start_session for the same sid.
+    let mut owners = state.session_owners.lock().await;
+    owners.retain(|_, owner| owner != &panel_id);
     Ok(())
 }
 

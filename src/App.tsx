@@ -769,13 +769,25 @@ function App() {
   // disappear behind an empty-grid hint. Only fires on the off→on
   // transition — if the user removes the last panel later we honor
   // their intent and leave the grid empty.
+  //
+  // Hand off ownership: stop the "main" subprocess and clear the
+  // single-mode session state before seeding. Otherwise the grid
+  // LivePanel's start_session would be rejected by the single-writer
+  // gate (main still holds this sid). The user trades "seamless return
+  // to single-mode" for "no divergent JSONL appends" — any return from
+  // grid leaves them in an empty single-mode they can re-populate from
+  // the sidebar.
   const prevGridModeRef = useRef(gridMode);
   useEffect(() => {
     const entering = gridMode && !prevGridModeRef.current;
     prevGridModeRef.current = gridMode;
     if (entering && gridPanels.length === 0 && activeSessionId) {
-      setGridPanels([activeSessionId]);
-      setSelectedGridPanelId(activeSessionId);
+      const handoffSid = activeSessionId;
+      invoke("stop_session", { panelId: "main" }).catch(() => {});
+      setSessionOn(false);
+      setActiveSessionId(undefined);
+      setGridPanels([handoffSid]);
+      setSelectedGridPanelId(handoffSid);
     }
   }, [gridMode, gridPanels.length, activeSessionId]);
 
