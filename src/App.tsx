@@ -153,6 +153,48 @@ export const REPLAY_SKIP = new Set([
 // rendering is essentially free on click.
 export const SESSION_TAIL_LIMIT = 200;
 
+// Per-session composer drafts in localStorage. Survives session switches
+// and restarts. Keyed by session id (or NEW_SESSION_KEY before the user
+// has started one). Pruned on app mount — drafts older than 30 days are
+// discarded to keep the store bounded.
+const DRAFTS_STORAGE_KEY = "composerDrafts";
+const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+type DraftStore = Record<string, { text: string; updated_ms: number }>;
+
+function loadDrafts(): DraftStore {
+  try {
+    const raw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as DraftStore;
+  } catch {
+    return {};
+  }
+}
+
+function saveDrafts(d: DraftStore): void {
+  try {
+    localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(d));
+  } catch {
+    // localStorage full / private mode — treat as best effort.
+  }
+}
+
+function pruneDrafts(d: DraftStore): DraftStore {
+  const cutoff = Date.now() - DRAFT_TTL_MS;
+  const out: DraftStore = {};
+  let changed = false;
+  for (const [k, v] of Object.entries(d)) {
+    if (v && typeof v.updated_ms === "number" && v.updated_ms > cutoff) {
+      out[k] = v;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? out : d;
+}
+
 // gridPanels holds two kinds of entries: real session ids (for sidebar-
 // pinned tiles) and "new:uuid:ts" placeholders (for tiles created via
 // "+ new panel"). Once a placeholder's subprocess reports its real
@@ -1131,6 +1173,11 @@ function App() {
             setSessionOn(false);
           }
           setGridPanels((prev) => prev.filter((p) => p !== id));
+          const d = loadDrafts();
+          if (id in d) {
+            delete d[id];
+            saveDrafts(d);
+          }
         })
         .catch(notifyErr("failed to delete session"));
     },
@@ -1174,6 +1221,55 @@ function App() {
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
+
+  // Composer draft persistence. Three effects:
+  //   1. On mount, prune drafts older than the TTL so the store stays
+  //      bounded across restarts.
+  //   2. On session switch (including initial mount), save whatever is
+  //      currently typed to the PREVIOUS session's key, then restore
+  //      the NEW session's draft into the composer.
+  //   3. On every keystroke, persist the current input under the
+  //      current session's key so a crash doesn't lose work.
+  useEffect(() => {
+    saveDrafts(pruneDrafts(loadDrafts()));
+  }, []);
+
+  const lastDraftKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = activeSessionId ?? NEW_SESSION_KEY;
+    const prevKey = lastDraftKeyRef.current;
+    lastDraftKeyRef.current = key;
+    if (prevKey !== null && prevKey !== key) {
+      // Persist what's currently in the composer to the prior session
+      // before we overwrite with the new session's draft.
+      const d = loadDrafts();
+      if (input) {
+        d[prevKey] = { text: input, updated_ms: Date.now() };
+      } else {
+        delete d[prevKey];
+      }
+      saveDrafts(d);
+    }
+    const restored = loadDrafts()[key]?.text ?? "";
+    // Only touch input if it actually differs — avoids a no-op render
+    // and prevents stomping on a draft that's equal to what's already
+    // in the composer.
+    if (restored !== input) setInput(restored);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const key = activeSessionId ?? NEW_SESSION_KEY;
+    const d = loadDrafts();
+    if (input) {
+      d[key] = { text: input, updated_ms: Date.now() };
+    } else if (key in d) {
+      delete d[key];
+    } else {
+      return;
+    }
+    saveDrafts(d);
+  }, [input, activeSessionId]);
 
   // Prune gridPanels entries that no longer correspond to a real session
   // on disk and aren't a pending "new:..." placeholder either. Happens
