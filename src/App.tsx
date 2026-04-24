@@ -1059,6 +1059,77 @@ function App() {
       if (unlisten) unlisten();
     };
   }, []);
+
+  // DOM-level file drop handler. Tauri's `onDragDropEvent` only fires
+  // when `dragDropEnabled: true` in tauri.conf.json, which is off so
+  // the grid panel reorder can use HTML5 drag. This catches file
+  // drops via `event.dataTransfer.files`, writes the bytes to a temp
+  // file via the Rust `save_dropped_file` command, and appends the
+  // path to attachments. Handles images from browsers / screenshot
+  // tools too since we read the Blob directly.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      if (Array.from(e.dataTransfer.types).includes("Files")) {
+        e.preventDefault();
+        setDragOver(true);
+      }
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // Only clear when the pointer leaves the window entirely.
+      if (e.relatedTarget === null) setDragOver(false);
+    };
+    const onDrop = async (e: DragEvent) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      setDragOver(false);
+      const files = Array.from(e.dataTransfer.files);
+      const dropX = e.clientX;
+      const dropY = e.clientY;
+      const paths: string[] = [];
+      for (const f of files) {
+        try {
+          const buf = new Uint8Array(await f.arrayBuffer());
+          const p = await invoke<string>("save_dropped_file", {
+            name: f.name || "dropped.bin",
+            bytes: Array.from(buf),
+          });
+          paths.push(p);
+        } catch (err) {
+          console.error("save_dropped_file failed:", err);
+        }
+      }
+      if (paths.length === 0) return;
+      // Grid-mode routing: same hit-test as the old Tauri handler.
+      const stack = document.elementsFromPoint(dropX, dropY);
+      for (const el of stack) {
+        const tile = el.closest(".grid-panel.live");
+        if (tile) {
+          tile.dispatchEvent(
+            new CustomEvent<string[]>("blackcrab:drop-files", {
+              detail: paths,
+            }),
+          );
+          return;
+        }
+      }
+      setAttachments((prev) => {
+        const existing = new Set(prev.map((a) => a.path));
+        const additions = paths
+          .filter((p) => !existing.has(p))
+          .map((p) => ({ id: randomId(), path: p }));
+        return [...prev, ...additions];
+      });
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [branchInfo, setBranchInfo] = useState<BranchInfo | null>(null);
   const [switchingBranch, setSwitchingBranch] = useState(false);
