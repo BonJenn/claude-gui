@@ -1,12 +1,12 @@
 [package]
-name = "claude-gui"
+name = "blackcrab"
 version = "0.1.0"
 description = "A GUI for Claude Code"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "claude_gui_lib"
+name = "blackcrab_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
