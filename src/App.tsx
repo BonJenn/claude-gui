@@ -3033,117 +3033,6 @@ function App() {
           )}
         </section>
 
-        {terminalMounted && (
-          <div
-            className={`terminal-panel ${terminalOpen ? "" : "hidden"}`}
-            style={{ height: terminalOpen ? `${terminalHeight}px` : 0 }}
-          >
-            <div
-              className="terminal-resizer"
-              onPointerDown={onTerminalResizerDown}
-              role="separator"
-              aria-orientation="horizontal"
-              title="drag to resize terminal"
-            />
-            <div className="terminal-panel-head">
-              <div className="terminal-tabs" role="tablist">
-                {terminalTabs.map((t) => (
-                  <div
-                    key={t.id}
-                    role="tab"
-                    aria-selected={t.id === activeTerminalId}
-                    className={`terminal-tab ${
-                      t.id === activeTerminalId ? "active" : ""
-                    }`}
-                    onClick={() => setActiveTerminalId(t.id)}
-                    title="double-click to rename"
-                  >
-                    {editingTerminalTabId === t.id ? (
-                      <input
-                        autoFocus
-                        className="terminal-tab-edit"
-                        defaultValue={t.label}
-                        onClick={(e) => e.stopPropagation()}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            (e.target as HTMLInputElement).blur();
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            setEditingTerminalTabId(null);
-                          }
-                        }}
-                        onBlur={(e) => {
-                          renameTerminalTab(t.id, e.target.value);
-                          setEditingTerminalTabId(null);
-                        }}
-                      />
-                    ) : (
-                      <span
-                        className="terminal-tab-label"
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          setEditingTerminalTabId(t.id);
-                        }}
-                      >
-                        {t.label}
-                      </span>
-                    )}
-                    {terminalTabs.length > 1 && (
-                      <span
-                        className="terminal-tab-close"
-                        role="button"
-                        aria-label="close tab"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          closeTerminalTab(t.id);
-                        }}
-                      >
-                        ×
-                      </span>
-                    )}
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  className="terminal-tab-add"
-                  onClick={addTerminalTab}
-                  title="new terminal tab"
-                  aria-label="new terminal tab"
-                >
-                  +
-                </button>
-              </div>
-              <span className="terminal-panel-cwd">{cwd}</span>
-              <button
-                type="button"
-                className="grid-panel-close"
-                onClick={() => setTerminalOpen(false)}
-                title="close terminal (⌘J)"
-              >
-                ×
-              </button>
-            </div>
-            <div className="terminal-panel-slots">
-              {terminalTabs.map((t) => (
-                <div
-                  key={t.id}
-                  className={`terminal-slot ${
-                    t.id === activeTerminalId ? "active" : "hidden"
-                  }`}
-                >
-                  <TerminalPanel
-                    terminalId={t.id}
-                    cwd={cwd}
-                    visible={t.id === activeTerminalId}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
           {(() => {
@@ -3276,6 +3165,117 @@ function App() {
             <div className="drag-hint">drop files to attach</div>
           )}
         </footer>
+        )}
+
+        {terminalMounted && (
+          <div
+            className={`terminal-panel ${terminalOpen ? "" : "hidden"}`}
+            style={{ height: terminalOpen ? `${terminalHeight}px` : 0 }}
+          >
+            <div
+              className="terminal-resizer"
+              onPointerDown={onTerminalResizerDown}
+              role="separator"
+              aria-orientation="horizontal"
+              title="drag to resize terminal"
+            />
+            <div className="terminal-panel-head">
+              <div className="terminal-tabs" role="tablist">
+                {terminalTabs.map((t) => (
+                  <div
+                    key={t.id}
+                    role="tab"
+                    aria-selected={t.id === activeTerminalId}
+                    className={`terminal-tab ${
+                      t.id === activeTerminalId ? "active" : ""
+                    }`}
+                    onClick={() => setActiveTerminalId(t.id)}
+                    title="double-click to rename"
+                  >
+                    {editingTerminalTabId === t.id ? (
+                      <input
+                        autoFocus
+                        className="terminal-tab-edit"
+                        defaultValue={t.label}
+                        onClick={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setEditingTerminalTabId(null);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          renameTerminalTab(t.id, e.target.value);
+                          setEditingTerminalTabId(null);
+                        }}
+                      />
+                    ) : (
+                      <span
+                        className="terminal-tab-label"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingTerminalTabId(t.id);
+                        }}
+                      >
+                        {t.label}
+                      </span>
+                    )}
+                    {terminalTabs.length > 1 && (
+                      <span
+                        className="terminal-tab-close"
+                        role="button"
+                        aria-label="close tab"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTerminalTab(t.id);
+                        }}
+                      >
+                        ×
+                      </span>
+                    )}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="terminal-tab-add"
+                  onClick={addTerminalTab}
+                  title="new terminal tab"
+                  aria-label="new terminal tab"
+                >
+                  +
+                </button>
+              </div>
+              <span className="terminal-panel-cwd">{cwd}</span>
+              <button
+                type="button"
+                className="grid-panel-close"
+                onClick={() => setTerminalOpen(false)}
+                title="close terminal (⌘J)"
+              >
+                ×
+              </button>
+            </div>
+            <div className="terminal-panel-slots">
+              {terminalTabs.map((t) => (
+                <div
+                  key={t.id}
+                  className={`terminal-slot ${
+                    t.id === activeTerminalId ? "active" : "hidden"
+                  }`}
+                >
+                  <TerminalPanel
+                    terminalId={t.id}
+                    cwd={cwd}
+                    visible={t.id === activeTerminalId}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         <div className="statusbar">
@@ -5095,7 +5095,7 @@ function LiveGrid({
   // over. Before that, we pick a sensible default based on how many
   // panels are in play (lean toward a taller top row when the bottom
   // row is mostly just the `+ new panel` affordance).
-  const containerRef = useRef<HTMLElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [topFraction, setTopFraction] = useState<number | null>(() => {
     const raw = localStorage.getItem("gridRowTopFraction");
     const n = raw ? parseFloat(raw) : NaN;

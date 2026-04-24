@@ -5,48 +5,52 @@
 
 :root,
 :root[data-theme="dark"] {
-  --bg: #0f1115;
-  --bg-elev: #161a22;
-  --bg-elev-2: #1d2230;
-  --border: #262c3a;
-  --text: #e6e8ee;
-  --text-dim: #9aa3b2;
-  --text-faint: #6b7280;
-  --accent: #c67f45;
-  --accent-soft: #c67f4533;
-  --user: #4a7dd6;
-  --user-soft: #4a7dd622;
+  --bg: #0a0a0a;
+  --bg-elev: #0c0c0c;
+  --bg-elev-2: #141414;
+  --border: #1f1f1f;
+  --text: #ededed;
+  --text-dim: #8a8a8a;
+  --text-faint: #5a5a5a;
+  --accent: #e94545;
+  --accent-soft: #e9454533;
+  --warn: #f0a23c;
+  --warn-soft: #f0a23c33;
+  --user: #5a8ae0;
+  --user-soft: #5a8ae022;
   --ok: #57b27b;
   --err: #e06767;
   --tool: #b084d6;
   --tool-soft: #b084d622;
   --diff-add: #57b27b;
-  --diff-add-bg: #1a2a1e;
+  --diff-add-bg: #112016;
   --diff-del: #e06767;
-  --diff-del-bg: #2a1919;
-  --terminal-bg: #0a0c11;
-  --terminal-text: #e6e8ee;
+  --diff-del-bg: #1f1212;
+  --terminal-bg: #080808;
+  --terminal-text: #ededed;
   --terminal-prompt: #57b27b;
-  --code-keyword: #7cb1ff;
-  --code-string: #a0d984;
-  --code-comment: #6b7280;
-  --code-number: #c691ff;
+  --code-keyword: #8fb8ff;
+  --code-string: #b3df91;
+  --code-comment: #5f5f5f;
+  --code-number: #cba1ff;
   --code-function: #ffcc7a;
-  --code-variable: #e6e8ee;
-  --code-meta: #9aa3b2;
+  --code-variable: #ededed;
+  --code-meta: #8a8a8a;
   color-scheme: dark;
 }
 
 :root[data-theme="jet"] {
   --bg: #000000;
-  --bg-elev: #0a0a0a;
-  --bg-elev-2: #141414;
-  --border: #1e1e1e;
+  --bg-elev: #070707;
+  --bg-elev-2: #111111;
+  --border: #1a1a1a;
   --text: #ededed;
-  --text-dim: #9a9a9a;
-  --text-faint: #5f5f5f;
-  --accent: #c67f45;
-  --accent-soft: #c67f4533;
+  --text-dim: #8a8a8a;
+  --text-faint: #555555;
+  --accent: #e94545;
+  --accent-soft: #e9454533;
+  --warn: #f0a23c;
+  --warn-soft: #f0a23c33;
   --user: #5a8ae0;
   --user-soft: #5a8ae022;
   --ok: #57b27b;
@@ -62,11 +66,11 @@
   --terminal-prompt: #57b27b;
   --code-keyword: #8fb8ff;
   --code-string: #b3df91;
-  --code-comment: #5f5f5f;
+  --code-comment: #555555;
   --code-number: #cba1ff;
   --code-function: #ffcc7a;
   --code-variable: #ededed;
-  --code-meta: #9a9a9a;
+  --code-meta: #8a8a8a;
   color-scheme: dark;
 }
 
@@ -78,8 +82,10 @@
   --text: #1a1c22;
   --text-dim: #4b5563;
   --text-faint: #6b7280;
-  --accent: #b86a2f;
-  --accent-soft: #b86a2f22;
+  --accent: #dc2626;
+  --accent-soft: #dc262622;
+  --warn: #b87900;
+  --warn-soft: #b8790022;
   --user: #1f5bc2;
   --user-soft: #1f5bc21a;
   --ok: #2a8246;
@@ -762,8 +768,8 @@ input:disabled, select:disabled, textarea:disabled {
 }
 
 .btn-start:hover:not(:disabled) {
-  background: #d89057;
-  border-color: #d89057;
+  background: color-mix(in srgb, var(--accent) 88%, #fff);
+  border-color: color-mix(in srgb, var(--accent) 88%, #fff);
 }
 
 .btn-stop {
@@ -960,8 +966,8 @@ body[data-resizing="true"] .grid-col-divider::before {
    for the short window where a flash + active-highlight would overlap,
    but `.active` wins because the user is already looking. */
 .grid-panel.attention-permission {
-  border-color: #e89849;
-  box-shadow: 0 0 0 1px #e8984980;
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 50%, transparent);
   animation: grid-panel-flash 1.2s ease-in-out infinite;
 }
 
@@ -1009,11 +1015,11 @@ body[data-resizing="true"] .grid-col-divider::before {
 
 @keyframes grid-panel-flash {
   0%, 100% {
-    border-color: #e89849;
-    box-shadow: 0 0 0 1px #e8984980;
+    border-color: var(--warn);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 50%, transparent);
   }
   50% {
-    border-color: #e8984933;
+    border-color: var(--warn-soft);
     box-shadow: 0 0 0 1px transparent;
   }
 }
@@ -1684,6 +1690,85 @@ body[data-resizing="true"] .terminal-resizer::after {
 }
 .grid-panel-meta .dot.off {
   background: var(--text-faint);
+}
+
+/* Persistent panel status indicator in the grid-panel header. Sits
+   alongside the subprocess-alive .dot and mirrors the transient
+   border-glow (.attention-*) so scanning multiple tiles tells you
+   at a glance which one is idle, thinking, waiting, done, or errored. */
+.panel-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--text-faint) 10%, transparent);
+  color: var(--text-faint);
+  flex-shrink: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.panel-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.panel-status-idle {
+  color: var(--text-faint);
+}
+
+.panel-status-thinking {
+  color: var(--user);
+  background: var(--user-soft);
+}
+.panel-status-thinking .panel-status-dot {
+  animation: panel-status-thinking-pulse 1.1s ease-in-out infinite;
+}
+@keyframes panel-status-thinking-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+.panel-status-waiting {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.panel-status-waiting .panel-status-dot {
+  animation: panel-status-waiting-flash 1.2s ease-in-out infinite;
+}
+@keyframes panel-status-waiting-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.panel-status-done {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+}
+
+.panel-status-error {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+}
+
+/* Hide the text label in narrow tiles — the dot + color still
+   communicate the state. The tile's `.grid-panel` width is
+   container-query-friendly since each tile is its own column. */
+@container (max-width: 340px) {
+  .panel-status-label {
+    display: none;
+  }
+}
+.grid-panel {
+  container-type: inline-size;
 }
 
 .transcript [data-virtuoso-scroller="true"],
@@ -2783,8 +2868,8 @@ details[open] > .tool-result-fold-summary .tool-result-fold-preview {
 }
 
 .btn-send:hover:not(:disabled) {
-  background: #d89057;
-  border-color: #d89057;
+  background: color-mix(in srgb, var(--accent) 88%, #fff);
+  border-color: color-mix(in srgb, var(--accent) 88%, #fff);
 }
 
 .btn-interrupt {
