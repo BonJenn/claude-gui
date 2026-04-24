@@ -728,6 +728,21 @@ function App() {
     }
   }, [gridMode, gridPanels, selectedGridPanelId]);
 
+  // On entering grid mode with nothing pinned, drop the current
+  // single-mode session into slot 0 so the conversation doesn't
+  // disappear behind an empty-grid hint. Only fires on the off→on
+  // transition — if the user removes the last panel later we honor
+  // their intent and leave the grid empty.
+  const prevGridModeRef = useRef(gridMode);
+  useEffect(() => {
+    const entering = gridMode && !prevGridModeRef.current;
+    prevGridModeRef.current = gridMode;
+    if (entering && gridPanels.length === 0 && activeSessionId) {
+      setGridPanels([activeSessionId]);
+      setSelectedGridPanelId(activeSessionId);
+    }
+  }, [gridMode, gridPanels.length, activeSessionId]);
+
   // In grid mode, the topbar mirrors whichever panel is currently selected
   // so cwd/branch/model/permissions stay in sync with what the user is
   // looking at. Nothing here touches the main-session subprocess.
@@ -1154,6 +1169,9 @@ function App() {
           text: `session ${newId?.slice(0, 8) ?? ""} • model ${ev.model ?? "?"} • ${ev.tools?.length ?? 0} tools`,
         },
       ]);
+      // A brand-new session isn't in the sidebar until list_sessions sees
+      // its freshly-created JSONL. Refresh now so it shows up immediately.
+      refreshSessions();
       return;
     }
 
