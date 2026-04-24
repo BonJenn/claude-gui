@@ -479,6 +479,7 @@ function App() {
     cwd: string;
     resolve: (choice: boolean | null) => void;
   } | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // Remember the most recent user message so "allow and retry" can
   // replay it after upgrading permission mode.
   const lastUserMessageRef = useRef<string>("");
@@ -666,6 +667,18 @@ function App() {
     localStorage.setItem("gridPanels", JSON.stringify(gridPanels));
   }, [gridPanels]);
 
+
+  // ⌘K / Ctrl+K anywhere in the window opens the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
@@ -1882,6 +1895,92 @@ function App() {
         <AuthErrorModal
           onDismiss={() => setAuthErrorSeen(false)}
           onQuit={() => getCurrentWindow().close().catch(() => {})}
+        />
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          sessions={sessions}
+          onClose={() => setPaletteOpen(false)}
+          onPickSession={(id, sessionCwd) => {
+            setPaletteOpen(false);
+            if (gridMode) setGridMode(false);
+            resumeSession(id, sessionCwd);
+          }}
+          commands={[
+            {
+              id: "toggle-grid",
+              title: gridMode ? "Leave grid mode" : "Enter grid mode",
+              hint: "⊞ grid",
+              run: () => {
+                setGridMode((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "cycle-theme",
+              title: `Theme: ${theme} → ${nextTheme(theme)}`,
+              hint: theme,
+              run: () => {
+                setTheme((t) => nextTheme(t));
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "new-session",
+              title: "Start a new session",
+              hint: "⌘N",
+              run: () => {
+                setPaletteOpen(false);
+                void newSession();
+              },
+            },
+            {
+              id: "toggle-preview",
+              title: previewOpen ? "Close preview panel" : "Open preview panel",
+              hint: "preview",
+              run: () => {
+                setPreviewOpen((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
+            ...(activeSessionId && entries.length > 0
+              ? [
+                  {
+                    id: "export-md",
+                    title: "Export this conversation as markdown",
+                    hint: "↓ export",
+                    run: async () => {
+                      setPaletteOpen(false);
+                      const info = sessions.find((s) => s.id === activeSessionId);
+                      const md = sessionEntriesToMarkdown(entries, {
+                        title: info?.title,
+                        sessionId: activeSessionId,
+                        model: info?.model || model,
+                        cwd: info?.cwd || cwd,
+                      });
+                      const base = (info?.title || "session")
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, "-")
+                        .replace(/^-+|-+$/g, "")
+                        .slice(0, 60);
+                      try {
+                        const chosen = await saveDialog({
+                          defaultPath: `${base || "session"}.md`,
+                          filters: [{ name: "Markdown", extensions: ["md"] }],
+                        });
+                        if (!chosen) return;
+                        await invoke("write_text_file", {
+                          path: chosen,
+                          content: md,
+                        });
+                      } catch (e) {
+                        console.error("export failed:", e);
+                      }
+                    },
+                  },
+                ]
+              : []),
+          ]}
         />
       )}
       {worktreePrompt && (
@@ -4285,6 +4384,221 @@ function LiveGrid({
   );
 }
 
+
+function nextTheme(t: "light" | "dark" | "jet"): "light" | "dark" | "jet" {
+  if (t === "light") return "dark";
+  if (t === "dark") return "jet";
+  return "light";
+}
+
+type PaletteCommand = {
+  id: string;
+  title: string;
+  hint?: string;
+  run: () => void | Promise<void>;
+};
+
+function CommandPalette({
+  sessions,
+  commands,
+  onPickSession,
+  onClose,
+}: {
+  sessions: SessionInfo[];
+  commands: PaletteCommand[];
+  onPickSession: (sessionId: string, cwd: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [idx, setIdx] = useState(0);
+  const [contentHits, setContentHits] = useState<Map<
+    string,
+    { preview: string; matchCount: number }
+  > | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setContentHits(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      invoke<Array<{ session_id: string; match_count: number; preview: string }>>(
+        "search_sessions",
+        { query: q },
+      )
+        .then((hits) => {
+          if (cancelled) return;
+          const m = new Map<string, { preview: string; matchCount: number }>();
+          for (const h of hits)
+            m.set(h.session_id, {
+              preview: h.preview,
+              matchCount: h.match_count,
+            });
+          setContentHits(m);
+        })
+        .catch(() => {
+          if (!cancelled) setContentHits(null);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [query]);
+
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const cmdHits = commands
+      .filter((c) => !q || c.title.toLowerCase().includes(q))
+      .map((c) => ({ type: "command" as const, command: c, score: 0 }));
+    const sessionHits: Array<{
+      type: "session";
+      session: SessionInfo;
+      preview?: string;
+      score: number;
+    }> = [];
+    for (const s of sessions) {
+      const titleMatch =
+        !q ||
+        s.title.toLowerCase().includes(q) ||
+        basename(s.cwd).toLowerCase().includes(q);
+      const contentMatch = contentHits?.has(s.id);
+      if (!q) {
+        sessionHits.push({ type: "session", session: s, score: 0 });
+      } else if (titleMatch) {
+        sessionHits.push({ type: "session", session: s, score: -10 });
+      } else if (contentMatch) {
+        const h = contentHits!.get(s.id)!;
+        sessionHits.push({
+          type: "session",
+          session: s,
+          preview: h.preview,
+          score: -h.matchCount,
+        });
+      }
+    }
+    sessionHits.sort((a, b) => a.score - b.score);
+    return [...cmdHits, ...sessionHits.slice(0, 20)];
+  }, [query, commands, sessions, contentHits]);
+
+  useEffect(() => {
+    setIdx(0);
+  }, [query]);
+
+  function runAt(i: number) {
+    const item = results[i];
+    if (!item) return;
+    if (item.type === "command") {
+      void item.command.run();
+    } else {
+      onPickSession(item.session.id, item.session.cwd);
+    }
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setIdx((i) => (results.length === 0 ? 0 : (i + 1) % results.length));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setIdx((i) =>
+        results.length === 0 ? 0 : (i - 1 + results.length) % results.length,
+      );
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      runAt(idx);
+    }
+  }
+
+  return (
+    <div
+      className="palette-overlay"
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="palette-card">
+        <input
+          ref={inputRef}
+          className="palette-input"
+          placeholder="jump to session or run a command…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKeyDown}
+          autoFocus
+        />
+        <div className="palette-list" role="listbox">
+          {results.length === 0 ? (
+            <div className="palette-empty">no matches</div>
+          ) : (
+            results.map((r, i) => {
+              const active = i === idx;
+              if (r.type === "command") {
+                return (
+                  <div
+                    key={`cmd-${r.command.id}`}
+                    role="option"
+                    aria-selected={active}
+                    className={`palette-item ${active ? "active" : ""}`}
+                    onMouseEnter={() => setIdx(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      runAt(i);
+                    }}
+                  >
+                    <span className="palette-kind palette-kind-cmd">cmd</span>
+                    <span className="palette-title">{r.command.title}</span>
+                    {r.command.hint && (
+                      <span className="palette-hint">{r.command.hint}</span>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={`ses-${r.session.id}`}
+                  role="option"
+                  aria-selected={active}
+                  className={`palette-item ${active ? "active" : ""}`}
+                  onMouseEnter={() => setIdx(i)}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    runAt(i);
+                  }}
+                >
+                  <span className="palette-kind palette-kind-session">ses</span>
+                  <span className="palette-title">{r.session.title || "(untitled)"}</span>
+                  <span className="palette-hint">
+                    {basename(r.session.cwd) || r.session.cwd}
+                  </span>
+                  {r.preview && (
+                    <div className="palette-preview">{r.preview}</div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+        <div className="palette-footer">
+          <span>↑↓ navigate</span>
+          <span>↵ select</span>
+          <span>esc close</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function WorktreePromptModal({
   cwd,
