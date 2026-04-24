@@ -518,6 +518,19 @@ function relativeTime(ms: number): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// Stable-handler hook (a userland approximation of React's experimental
+// useEffectEvent). Returns a callback whose identity never changes but
+// whose body always sees the latest closure. Lets us pass handlers into
+// React.memo'd children without busting their memo on every parent
+// re-render.
+function useEvent<A extends unknown[], R>(
+  handler: (...args: A) => R,
+): (...args: A) => R {
+  const ref = useRef(handler);
+  ref.current = handler;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
 function App() {
   const [cwd, setCwd] = useState<string>("");
   const [model, setModel] = useState<string>("");
@@ -1202,6 +1215,12 @@ function App() {
   // Tracks which resume attempt is latest so an older slow load doesn't
   // clobber a newer one if the user clicks quickly.
   const resumeTokenRef = useRef(0);
+
+  // In-flight start_session promise. resumeSession kicks one off in the
+  // background and stores it here; send/sendQuickReply await it before
+  // dispatching send_message so the visible session click doesn't block
+  // on subprocess boot. Cleared once the promise settles.
+  const startPromiseRef = useRef<Promise<unknown> | null>(null);
 
   // Mirror live single-view entries into sessionCacheRef so that flipping
   // back to grid mode shows messages typed/streamed while in single view.
@@ -2151,9 +2170,13 @@ function App() {
 
     const useCwd = sessionCwd || cwd;
 
-    // Kick off the claude subprocess in parallel — it boots while we load.
-    // setPermissionMode above hasn't flushed yet, so send the session's own
-    // permission mode to start_session directly.
+    // Kick off the claude subprocess in the background. We do NOT block
+    // the visible switch on it — the click is "instant" because the
+    // cached transcript is already showing and the input is already
+    // focused (below). send/sendQuickReply await startPromiseRef before
+    // dispatching send_message so messages still go to the right pid.
+    // setPermissionMode above hasn't flushed yet, so send the session's
+    // own permission mode to start_session directly.
     const startPromise = invoke("start_session", {
       panelId: "main",
       cwd: useCwd,
@@ -2161,6 +2184,28 @@ function App() {
       model: sessionModel || model || null,
       resumeId: sessionId,
     });
+    startPromiseRef.current = startPromise;
+    // Optimistic flip — sessionOn becomes the "ready to chat" indicator
+    // immediately. send() will still await the start promise before any
+    // send_message, so we never dispatch into a non-existent subprocess.
+    setSessionOn(true);
+    setTimeout(() => inputRef.current?.focus(), 0);
+    startPromise
+      .catch((e) => {
+        if (!isLatest()) return;
+        setSessionOn(false);
+        setEntries((es) => [
+          ...es,
+          { kind: "system", id: randomId(), text: `failed to start: ${e}` },
+        ]);
+        notifyErr("failed to start session")(e);
+      })
+      .finally(() => {
+        if (startPromiseRef.current === startPromise) {
+          startPromiseRef.current = null;
+        }
+        if (isLatest()) switchingSessionRef.current = false;
+      });
 
     if (!cacheHit) {
       try {
@@ -2203,23 +2248,6 @@ function App() {
       }
     }
 
-    try {
-      await startPromise;
-      if (isLatest()) {
-        setSessionOn(true);
-        setTimeout(() => inputRef.current?.focus(), 0);
-      }
-    } catch (e) {
-      if (isLatest()) {
-        setEntries((es) => [
-          ...es,
-          { kind: "system", id: randomId(), text: `failed to start: ${e}` },
-        ]);
-        notifyErr("failed to start session")(e);
-      }
-    } finally {
-      if (isLatest()) switchingSessionRef.current = false;
-    }
   }
 
   async function stopSession() {
@@ -2272,6 +2300,14 @@ function App() {
   // and attachment handling.
   async function sendQuickReply(text: string) {
     if (busy || !text) return;
+    if (startPromiseRef.current) {
+      try {
+        await startPromiseRef.current;
+      } catch {
+        // start failed — sessionOn was flipped back to false; fall
+        // through to spawn a fresh subprocess below.
+      }
+    }
     if (!sessionOn) {
       try {
         await invoke("start_session", {
@@ -2314,6 +2350,15 @@ function App() {
   async function send() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || busy) return;
+
+    if (startPromiseRef.current) {
+      try {
+        await startPromiseRef.current;
+      } catch {
+        // start failed — sessionOn was flipped back to false; fall
+        // through to spawn a fresh subprocess below.
+      }
+    }
 
     if (!sessionOn) {
       try {
@@ -2476,6 +2521,73 @@ function App() {
 
   const hasStderr = stderrLines.length > 0;
 
+  // Stable handler identities for the memoized Sidebar so it can skip
+  // re-rendering on unrelated state changes (composer keystrokes etc.).
+  // useEvent body always sees the latest closure, but the returned ref
+  // identity never changes.
+  const onSidebarResume = useEvent((id: string, cwd: string) => {
+    if (gridMode) {
+      // Clicking a sidebar session in grid mode:
+      //   * if it's already in the grid → focus it
+      //   * if there's an empty slot → append (don't touch selection)
+      //   * if the grid is full → replace the selected panel (or last)
+      // findPanelForSession handles both direct id matches and
+      // "new:..." placeholders that have reported a real session id.
+      const existingKey = findPanelForSession(
+        id,
+        gridPanels,
+        panelSessionIds,
+      );
+      if (existingKey) {
+        setSelectedGridPanelId(existingKey);
+        return;
+      }
+      if (gridPanels.length < 6) {
+        setGridPanels((prev) =>
+          prev.includes(id) ? prev : [...prev, id],
+        );
+        setSelectedGridPanelId(id);
+        return;
+      }
+      const targetId =
+        selectedGridPanelId && gridPanels.includes(selectedGridPanelId)
+          ? selectedGridPanelId
+          : gridPanels[gridPanels.length - 1];
+      setGridPanels((prev) => {
+        const idx = prev.indexOf(targetId);
+        if (idx < 0) return prev;
+        const next = prev.slice();
+        next[idx] = id;
+        return next;
+      });
+      if (targetId.startsWith("new:")) {
+        setNewPanelCwds((m) => {
+          if (!(targetId in m)) return m;
+          const next = { ...m };
+          delete next[targetId];
+          return next;
+        });
+        setNewPanelWorktree((m) => {
+          if (!(targetId in m)) return m;
+          const next = { ...m };
+          delete next[targetId];
+          return next;
+        });
+      }
+      setSelectedGridPanelId(id);
+    } else {
+      resumeSession(id, cwd);
+    }
+  });
+  const onSidebarNew = useEvent(() => {
+    newSession();
+  });
+  const sidebarActiveId = gridMode
+    ? selectedGridPanelId
+      ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
+      : undefined
+    : activeSessionId;
+
   return (
     <div className="root">
       <ToastHost />
@@ -2599,77 +2711,15 @@ function App() {
       )}
       <Sidebar
         sessions={sessions}
-        activeId={
-          gridMode
-            ? selectedGridPanelId
-              ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
-              : undefined
-            : activeSessionId
-        }
+        activeId={sidebarActiveId}
         pinActiveToTop={!gridMode}
         loading={sessionsLoading}
         resumingId={resumingId}
-        onResume={(id, cwd) => {
-          if (gridMode) {
-            // Clicking a sidebar session:
-            //   * if it's already in the grid → focus it
-            //   * if there's an empty slot → append (don't touch selection)
-            //   * if the grid is full → replace the selected panel (or last)
-            // "In the grid" means either a direct entry matching `id`, or
-            // a "new:..." placeholder whose subprocess has reported `id`
-            // as its real session. findPanelForSession handles both
-            // cases so we don't double-add a tile for the same session.
-            const existingKey = findPanelForSession(
-              id,
-              gridPanels,
-              panelSessionIds,
-            );
-            if (existingKey) {
-              setSelectedGridPanelId(existingKey);
-              return;
-            }
-            if (gridPanels.length < 6) {
-              setGridPanels((prev) =>
-                prev.includes(id) ? prev : [...prev, id],
-              );
-              setSelectedGridPanelId(id);
-              return;
-            }
-            // Full grid — replace the selected panel (or last).
-            const targetId =
-              selectedGridPanelId && gridPanels.includes(selectedGridPanelId)
-                ? selectedGridPanelId
-                : gridPanels[gridPanels.length - 1];
-            setGridPanels((prev) => {
-              const idx = prev.indexOf(targetId);
-              if (idx < 0) return prev;
-              const next = prev.slice();
-              next[idx] = id;
-              return next;
-            });
-            if (targetId.startsWith("new:")) {
-              setNewPanelCwds((m) => {
-                if (!(targetId in m)) return m;
-                const next = { ...m };
-                delete next[targetId];
-                return next;
-              });
-              setNewPanelWorktree((m) => {
-                if (!(targetId in m)) return m;
-                const next = { ...m };
-                delete next[targetId];
-                return next;
-              });
-            }
-            setSelectedGridPanelId(id);
-          } else {
-            resumeSession(id, cwd);
-          }
-        }}
+        onResume={onSidebarResume}
         onRename={renameSession}
         onDelete={deleteSession}
-        onNew={() => newSession()}
-        onRefresh={() => refreshSessions()}
+        onNew={onSidebarNew}
+        onRefresh={refreshSessions}
         cwd={cwd}
         projectFilter={projectFilter}
         onProjectFilterChange={setProjectFilter}
@@ -3909,7 +3959,7 @@ function barColor(ratio: number): string {
   return "var(--ok)";
 }
 
-function Sidebar({
+const Sidebar = memo(function Sidebar({
   sessions,
   activeId,
   loading,
@@ -4192,7 +4242,7 @@ function Sidebar({
       </div>
     </aside>
   );
-}
+});
 
 // Inline-editable text. Click to edit; Enter or blur saves, Esc cancels.
 // Used for conversation titles in both the sidebar and grid panel header.
@@ -5863,7 +5913,7 @@ function PermissionPromptOverlay({
 const TRANSCRIPT_WINDOW = 40;
 const TRANSCRIPT_WINDOW_STEP = 40;
 
-function PlainTranscript({
+const PlainTranscript = memo(function PlainTranscript({
   entries,
   busy,
   scrollRef,
@@ -5932,7 +5982,7 @@ function PlainTranscript({
       {busy && <TypingIndicator />}
     </div>
   );
-}
+});
 
 export function TypingIndicator() {
   return (
