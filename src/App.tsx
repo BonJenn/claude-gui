@@ -517,6 +517,7 @@ function App() {
     resolve: (choice: boolean | null) => void;
   } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   // Per-terminal-tab state. Each entry's id becomes its PTY id; tabs
   // are unmounted when closed, killing their shells.
@@ -830,6 +831,17 @@ function App() {
       } else if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
         e.preventDefault();
         setTerminalOpen((v) => !v);
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        (e.key === "f" || e.key === "F")
+      ) {
+        // In-transcript find. Only scope to single-mode for now — grid
+        // mode has multiple transcripts and would need per-panel wiring.
+        // Browser's native find is intercepted by the WKWebView, so we
+        // implement our own.
+        e.preventDefault();
+        setSearchOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -2644,6 +2656,12 @@ function App() {
           />
         </div>
         <section className={`transcript-wrap ${gridMode ? "hidden" : ""}`}>
+          {searchOpen && (
+            <SearchOverlay
+              scrollRef={transcriptScrollRef}
+              onClose={() => setSearchOpen(false)}
+            />
+          )}
           {/* Render one PlainTranscript per kept session. Only the active
               slot is visible; the others stay mounted behind display:none
               so switching back to them is a CSS toggle instead of a
@@ -3096,6 +3114,173 @@ function ToastHost() {
           {t.msg}
         </div>
       ))}
+    </div>
+  );
+}
+
+// In-transcript find overlay. Walks the text nodes under `scrollRef`,
+// wraps matches in <mark.search-match>, cycles current match with
+// next/prev (Enter / Shift+Enter). Closes on Esc or explicit click.
+// Scoped to the single-mode transcript — grid mode's multiple scroll
+// regions would need per-panel wiring.
+//
+// Caveat: if the transcript re-renders while the overlay is open
+// (e.g. a streaming turn arrives), the wrapping <mark>s are thrown out
+// and the user has to re-type to re-search. This keeps the code simple
+// and avoids fighting react-markdown's memoized output.
+function SearchOverlay({
+  scrollRef,
+  onClose,
+}: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  onClose: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [current, setCurrent] = useState(0);
+  const [total, setTotal] = useState(0);
+  const marksRef = useRef<HTMLElement[]>([]);
+
+  function clearMarks() {
+    for (const m of marksRef.current) {
+      const parent = m.parentNode;
+      if (!parent) continue;
+      while (m.firstChild) parent.insertBefore(m.firstChild, m);
+      parent.removeChild(m);
+      parent.normalize();
+    }
+    marksRef.current = [];
+  }
+
+  function escapeRe(s: string) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function highlight(q: string) {
+    clearMarks();
+    setTotal(0);
+    setCurrent(0);
+    const root = scrollRef.current;
+    if (!q || !root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const targets: Text[] = [];
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const t = node as Text;
+      // Skip text nodes inside input/textarea — those are the composer
+      // itself and their content isn't visible transcript text.
+      const parent = t.parentElement;
+      if (!parent) continue;
+      if (parent.closest(".editable-title-input, textarea, input")) continue;
+      if (t.nodeValue && t.nodeValue.toLowerCase().includes(q.toLowerCase())) {
+        targets.push(t);
+      }
+    }
+    const re = new RegExp(escapeRe(q), "gi");
+    const marks: HTMLElement[] = [];
+    for (const text of targets) {
+      const parent = text.parentNode;
+      if (!parent) continue;
+      const val = text.nodeValue ?? "";
+      const frag = document.createDocumentFragment();
+      re.lastIndex = 0;
+      let last = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(val)) !== null) {
+        if (m.index > last) {
+          frag.appendChild(document.createTextNode(val.slice(last, m.index)));
+        }
+        const mark = document.createElement("mark");
+        mark.className = "search-match";
+        mark.textContent = m[0];
+        frag.appendChild(mark);
+        marks.push(mark);
+        last = m.index + m[0].length;
+        if (m.index === re.lastIndex) re.lastIndex++; // empty-match guard
+      }
+      if (last < val.length) {
+        frag.appendChild(document.createTextNode(val.slice(last)));
+      }
+      parent.replaceChild(frag, text);
+    }
+    marksRef.current = marks;
+    setTotal(marks.length);
+    if (marks.length > 0) {
+      setCurrent(0);
+      marks[0].classList.add("active");
+      marks[0].scrollIntoView({ block: "center", behavior: "auto" });
+    }
+  }
+
+  useEffect(() => {
+    highlight(query);
+    return clearMarks;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  function jump(delta: number) {
+    const marks = marksRef.current;
+    if (marks.length === 0) return;
+    marks[current]?.classList.remove("active");
+    const next = (current + delta + marks.length) % marks.length;
+    setCurrent(next);
+    marks[next].classList.add("active");
+    marks[next].scrollIntoView({ block: "center", behavior: "auto" });
+  }
+
+  return (
+    <div className="search-overlay" role="search">
+      <input
+        ref={inputRef}
+        className="search-input"
+        value={query}
+        placeholder="find in transcript"
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            jump(e.shiftKey ? -1 : 1);
+          }
+        }}
+      />
+      <span className="search-count">
+        {total === 0 ? (query ? "0" : "") : `${current + 1} / ${total}`}
+      </span>
+      <button
+        type="button"
+        className="search-btn"
+        onClick={() => jump(-1)}
+        title="previous match (⇧↵)"
+        disabled={total === 0}
+      >
+        ↑
+      </button>
+      <button
+        type="button"
+        className="search-btn"
+        onClick={() => jump(1)}
+        title="next match (↵)"
+        disabled={total === 0}
+      >
+        ↓
+      </button>
+      <button
+        type="button"
+        className="search-btn search-close"
+        onClick={onClose}
+        title="close (esc)"
+        aria-label="close search"
+      >
+        ×
+      </button>
     </div>
   );
 }

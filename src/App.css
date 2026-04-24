@@ -2913,6 +2913,83 @@ details[open] > .tool-result-fold-summary .tool-result-fold-preview {
   word-wrap: break-word;
 }
 
+/* In-transcript find (⌘F). Floats at the top of the transcript area
+   so it doesn't push layout around, and renders above the fade/scroll
+   controls. Matches get <mark.search-match>; the currently selected
+   match gets .active. */
+.search-overlay {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+.search-input {
+  width: 220px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+}
+.search-input:focus {
+  border-color: var(--accent);
+}
+.search-count {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+  text-align: center;
+}
+.search-btn {
+  background: transparent;
+  color: var(--text-faint);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.search-btn:not(:disabled):hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+.search-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.search-close:hover {
+  color: var(--err);
+  border-color: var(--err);
+}
+mark.search-match {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+mark.search-match.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
 /* Transient notifications (toast bus). Stacks top-right, auto-dismiss
    after 5s, click to dismiss now. */
 .toast-host {
