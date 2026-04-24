@@ -252,6 +252,41 @@ fn write_text_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("write failed: {}", e))
 }
 
+// List tracked (and new, non-ignored) files under `cwd` via
+// `git ls-files`. Empty vec when the dir isn't a git repo — the UI
+// just shows no suggestions in that case.
+#[tauri::command]
+fn list_tracked_files(cwd: String) -> Result<Vec<String>, String> {
+    if cwd.is_empty() || !std::path::Path::new(&cwd).is_dir() {
+        return Ok(Vec::new());
+    }
+    use std::process::Command as StdCommand;
+    let output = StdCommand::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("git ls-files failed: {}", e))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut paths: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    // Dedup in case ls-files returns duplicates for some reason, keep
+    // stable ordering (git already orders by path lexicographically).
+    paths.dedup();
+    Ok(paths)
+}
+
 #[tauri::command]
 async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
     let mut guard = state.sessions.lock().await;
@@ -857,7 +892,8 @@ pub fn run() {
             load_session_tail,
             git_remote_url,
             set_session_title,
-            write_text_file
+            write_text_file,
+            list_tracked_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

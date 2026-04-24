@@ -451,6 +451,13 @@ function App() {
     tools?: string[];
   } | null>(null);
   const [input, setInput] = useState("");
+  // @file autocomplete state. Populated from git ls-files for the
+  // current cwd; a lightweight case-insensitive substring match powers
+  // the dropdown.
+  const [fileMentions, setFileMentions] = useState<string[]>([]);
+  const fileMentionsCwdRef = useRef<string>("");
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIdx, setMentionIdx] = useState(0);
   const [attachments, setAttachments] = useState<{ id: string; path: string }[]>(
     [],
   );
@@ -1763,7 +1770,104 @@ function App() {
     }
   }
 
+  // Fetch the cwd's git-tracked files (ls-files) once per cwd change.
+  // Small cost, rare change. Non-git cwds come back empty and the
+  // autocomplete simply shows no suggestions.
+  useEffect(() => {
+    if (!cwd) return;
+    if (fileMentionsCwdRef.current === cwd) return;
+    fileMentionsCwdRef.current = cwd;
+    invoke<string[]>("list_tracked_files", { cwd })
+      .then((paths) => setFileMentions(paths))
+      .catch(() => setFileMentions([]));
+  }, [cwd]);
+
+  // Walk back from the caret to find the current `@token` being typed,
+  // if any. Returns null when the token doesn't look like a file-path
+  // mention or the user isn't in one.
+  function currentMentionQuery(): string | null {
+    const el = inputRef.current;
+    if (!el) return null;
+    const pos = el.selectionStart ?? input.length;
+    const before = input.slice(0, pos);
+    const m = before.match(/(?:^|\s)@([\w./\-]*)$/);
+    return m ? m[1] : null;
+  }
+
+  const filteredMentions = useMemo(() => {
+    if (mentionQuery === null) return [] as string[];
+    if (!fileMentions.length) return [] as string[];
+    const q = mentionQuery.toLowerCase();
+    if (!q) return fileMentions.slice(0, 8);
+    const ranked: Array<{ path: string; score: number }> = [];
+    for (const p of fileMentions) {
+      const lp = p.toLowerCase();
+      const idx = lp.indexOf(q);
+      if (idx < 0) continue;
+      // Exact suffix / filename matches rank higher than mid-path hits.
+      const base = lp.slice(lp.lastIndexOf("/") + 1);
+      let score = idx;
+      if (base.startsWith(q)) score -= 1000;
+      else if (base.includes(q)) score -= 500;
+      ranked.push({ path: p, score });
+      if (ranked.length > 200) break; // cheap cap before sort
+    }
+    ranked.sort((a, b) => a.score - b.score);
+    return ranked.slice(0, 8).map((r) => r.path);
+  }, [mentionQuery, fileMentions]);
+
+  useEffect(() => {
+    setMentionIdx(0);
+  }, [mentionQuery]);
+
+  function insertMention(path: string) {
+    const el = inputRef.current;
+    if (!el) return;
+    const pos = el.selectionStart ?? input.length;
+    const before = input.slice(0, pos);
+    const after = input.slice(pos);
+    // Replace the trailing `@query` with `@path ` (trailing space so
+    // the next word doesn't accidentally re-trigger the dropdown).
+    const replaced = before.replace(/@([\w./\-]*)$/, `@${path} `);
+    const next = replaced + after;
+    setInput(next);
+    setMentionQuery(null);
+    // Restore caret position after the inserted path.
+    requestAnimationFrame(() => {
+      const newPos = replaced.length;
+      if (el && el === inputRef.current) {
+        el.selectionStart = newPos;
+        el.selectionEnd = newPos;
+      }
+    });
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionQuery !== null && filteredMentions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIdx((i) => (i + 1) % filteredMentions.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIdx(
+          (i) => (i - 1 + filteredMentions.length) % filteredMentions.length,
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const pick = filteredMentions[mentionIdx];
+        if (pick) insertMention(pick);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -2268,13 +2372,45 @@ function App() {
               })}
             </div>
           )}
+          {mentionQuery !== null && filteredMentions.length > 0 && (
+            <div className="mention-suggestions" role="listbox">
+              {filteredMentions.map((p, i) => (
+                <div
+                  key={p}
+                  role="option"
+                  aria-selected={i === mentionIdx}
+                  className={`mention-item ${i === mentionIdx ? "active" : ""}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertMention(p);
+                  }}
+                  onMouseEnter={() => setMentionIdx(i)}
+                >
+                  <span className="mention-path">{p}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="composer-row">
             <textarea
               ref={inputRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                // Defer the mention check by one tick so the selection
+                // position reflects the new value.
+                requestAnimationFrame(() => {
+                  setMentionQuery(currentMentionQuery());
+                });
+              }}
+              onKeyUp={() => {
+                if (mentionQuery !== null) {
+                  setMentionQuery(currentMentionQuery());
+                }
+              }}
+              onBlur={() => setMentionQuery(null)}
               onKeyDown={onKeyDown}
-              placeholder="message Claude…  (Enter to send, Shift+Enter for newline; drop files anywhere)"
+              placeholder="message Claude…  (Enter to send, Shift+Enter for newline; drop files anywhere; type @ for file autocomplete)"
               disabled={busy}
               rows={3}
             />
