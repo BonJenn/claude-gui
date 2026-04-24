@@ -431,6 +431,38 @@ body {
   border-color: var(--accent-soft);
 }
 
+/* Hover-revealed delete affordance. Anchored top-right, narrow so it
+   doesn't push the title when visible. Click stops row propagation so
+   the row's onClick (resume) doesn't fire first. */
+.session-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
+}
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete {
+  opacity: 1;
+}
+.session-delete:hover {
+  background: var(--bg-elev);
+  border-color: var(--err);
+  color: var(--err);
+}
+
 .session-item:active {
   transform: scale(0.985);
 }

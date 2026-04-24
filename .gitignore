@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code per-project state (scheduled-task locks, etc).
+.claude/

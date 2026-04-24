@@ -1107,6 +1107,24 @@ function App() {
     });
   }, []);
 
+  const deleteSession = useCallback(
+    (id: string, sessionCwd: string, title: string) => {
+      const label = title && title !== id ? `"${title}"` : id.slice(0, 8);
+      if (!window.confirm(`Move session ${label} to trash?`)) return;
+      invoke("delete_session", { sessionId: id, cwd: sessionCwd })
+        .then(() => {
+          setSessions((prev) => prev.filter((s) => s.id !== id));
+          if (activeSessionIdRef.current === id) {
+            setActiveSessionId(undefined);
+            setSessionOn(false);
+          }
+          setGridPanels((prev) => prev.filter((p) => p !== id));
+        })
+        .catch(notifyErr("failed to delete session"));
+    },
+    [setActiveSessionId],
+  );
+
   const renameSession = useCallback(
     async (id: string, sessionCwd: string, title: string) => {
       const trimmed = title.trim();
@@ -2400,6 +2418,7 @@ function App() {
           }
         }}
         onRename={renameSession}
+        onDelete={deleteSession}
         onNew={() => newSession()}
         onRefresh={() => refreshSessions()}
         cwd={cwd}
@@ -3444,6 +3463,7 @@ function Sidebar({
   resumingId,
   onResume,
   onRename,
+  onDelete,
   onNew,
   onRefresh,
   cwd,
@@ -3463,6 +3483,7 @@ function Sidebar({
   resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
+  onDelete: (id: string, cwd: string, title: string) => void;
   onNew: () => void;
   onRefresh: () => void;
   cwd: string;
@@ -3694,6 +3715,7 @@ function Sidebar({
                       resumingId,
                       onResume,
                       onRename,
+                      onDelete,
                       itemRefs,
                       grouped: true,
                       contentHit: contentHits?.get(s.id),
@@ -3708,6 +3730,7 @@ function Sidebar({
                 resumingId,
                 onResume,
                 onRename,
+                onDelete,
                 itemRefs,
                 grouped: false,
                 contentHit: contentHits?.get(s.id),
@@ -3812,6 +3835,7 @@ function renderSessionItem(
     resumingId: string | null;
     onResume: (id: string, cwd: string) => void;
     onRename: (id: string, cwd: string, title: string) => Promise<void>;
+    onDelete: (id: string, cwd: string, title: string) => void;
     itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
     grouped: boolean;
     contentHit?: { preview: string; matchCount: number };
@@ -3852,6 +3876,19 @@ function renderSessionItem(
         placeholder="(untitled)"
         onSave={(next) => ctx.onRename(s.id, s.cwd, next)}
       />
+      <button
+        type="button"
+        className="session-delete"
+        title="move session to trash"
+        aria-label="delete session"
+        onClick={(e) => {
+          e.stopPropagation();
+          ctx.onDelete(s.id, s.cwd, s.title || "(untitled)");
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        ×
+      </button>
       {!ctx.grouped && (
         <span className="session-project">{basename(s.cwd) || "unknown"}</span>
       )}
