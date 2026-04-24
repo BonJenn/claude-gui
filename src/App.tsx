@@ -2918,16 +2918,59 @@ function Sidebar({
       });
   }, [sessions]);
 
+  // Content search runs in Rust, debounced, and augments the
+  // title/basename/id filter. Maps session id -> preview snippet.
+  const [contentHits, setContentHits] = useState<Map<
+    string,
+    { preview: string; matchCount: number }
+  > | null>(null);
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) {
+      setContentHits(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      invoke<Array<{ session_id: string; match_count: number; preview: string }>>(
+        "search_sessions",
+        { query: q },
+      )
+        .then((hits) => {
+          if (cancelled) return;
+          const m = new Map<string, { preview: string; matchCount: number }>();
+          for (const h of hits) {
+            m.set(h.session_id, {
+              preview: h.preview,
+              matchCount: h.match_count,
+            });
+          }
+          setContentHits(m);
+        })
+        .catch(() => {
+          if (!cancelled) setContentHits(null);
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [search]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matches = sessions.filter((s) => {
       if (projectFilter && s.cwd !== projectFilter) return false;
       if (!q) return true;
-      return (
+      if (
         s.title.toLowerCase().includes(q) ||
         basename(s.cwd).toLowerCase().includes(q) ||
         s.id.toLowerCase().includes(q)
-      );
+      ) {
+        return true;
+      }
+      // Fall through to the content-search result map.
+      return contentHits ? contentHits.has(s.id) : false;
     });
     // Only float the active to the top in flat mode — in grouped mode it
     // belongs under its project header. Also suppressed when pinActiveToTop
@@ -2939,7 +2982,15 @@ function Sidebar({
       }
     }
     return matches;
-  }, [sessions, projectFilter, search, activeId, grouped, pinActiveToTop]);
+  }, [
+    sessions,
+    projectFilter,
+    search,
+    activeId,
+    grouped,
+    pinActiveToTop,
+    contentHits,
+  ]);
 
   // Group filtered sessions by project basename when the toggle is on.
   const groupList = useMemo(() => {
@@ -3055,6 +3106,7 @@ function Sidebar({
                       onRename,
                       itemRefs,
                       grouped: true,
+                      contentHit: contentHits?.get(s.id),
                     }),
                   )}
                 </div>
@@ -3068,6 +3120,7 @@ function Sidebar({
                 onRename,
                 itemRefs,
                 grouped: false,
+                contentHit: contentHits?.get(s.id),
               }),
             )}
       </div>
@@ -3171,6 +3224,7 @@ function renderSessionItem(
     onRename: (id: string, cwd: string, title: string) => Promise<void>;
     itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
     grouped: boolean;
+    contentHit?: { preview: string; matchCount: number };
   },
 ) {
   const ctxRatio =
@@ -3241,6 +3295,15 @@ function renderSessionItem(
         <span>{relativeTime(s.mtime_ms)}</span>
         <span className="session-count">{s.message_count} msg</span>
       </div>
+      {ctx.contentHit && (
+        <div className="session-hit-preview" title={ctx.contentHit.preview}>
+          <span className="session-hit-count">
+            {ctx.contentHit.matchCount} match
+            {ctx.contentHit.matchCount === 1 ? "" : "es"}
+          </span>
+          <span className="session-hit-snippet">{ctx.contentHit.preview}</span>
+        </div>
+      )}
     </div>
   );
 }

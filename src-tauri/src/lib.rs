@@ -664,6 +664,135 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
     })
 }
 
+#[derive(serde::Serialize)]
+struct SessionSearchHit {
+    session_id: String,
+    match_count: u32,
+    preview: String,
+}
+
+// Greps every session JSONL for `query` and returns the sessions
+// that matched (plus a short preview of the first match). Case-
+// insensitive substring match against user and assistant text
+// content. Bounded pretty loosely — we return up to 200 hits.
+#[tauri::command]
+fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let projects = match projects_dir() {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<SessionSearchHit> = Vec::new();
+    let dirs = fs::read_dir(&projects).map_err(|e| e.to_string())?;
+    for dir_entry in dirs.flatten() {
+        let dir_path = dir_entry.path();
+        if !dir_path.is_dir() {
+            continue;
+        }
+        let files = match fs::read_dir(&dir_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        for file_entry in files.flatten() {
+            let path = file_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(hit) = search_in_session(&path, &needle) {
+                out.push(hit);
+                if out.len() >= 200 {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    // Sort by match_count desc so the most relevant sessions float up.
+    out.sort_by(|a, b| b.match_count.cmp(&a.match_count));
+    Ok(out)
+}
+
+fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionSearchHit> {
+    let session_id = path.file_stem()?.to_string_lossy().to_string();
+    let file = std::fs::File::open(path).ok()?;
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(file);
+    let mut match_count: u32 = 0;
+    let mut preview = String::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if t != "user" && t != "assistant" {
+            continue;
+        }
+        let texts = collect_text(v.pointer("/message/content"));
+        for snippet in texts {
+            let haystack = snippet.to_lowercase();
+            if let Some(pos) = haystack.find(needle) {
+                match_count += 1;
+                if preview.is_empty() {
+                    let start = pos.saturating_sub(40);
+                    let end = (pos + needle.len() + 80).min(snippet.len());
+                    preview = snippet
+                        .get(start..end)
+                        .unwrap_or(&snippet[..snippet.len().min(120)])
+                        .replace('\n', " ")
+                        .trim()
+                        .to_string();
+                }
+            }
+        }
+    }
+    if match_count == 0 {
+        return None;
+    }
+    Some(SessionSearchHit {
+        session_id,
+        match_count,
+        preview,
+    })
+}
+
+fn collect_text(content: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(v) = content else { return Vec::new() };
+    if let Some(s) = v.as_str() {
+        return vec![s.to_string()];
+    }
+    let Some(arr) = v.as_array() else { return Vec::new() };
+    let mut out = Vec::new();
+    for block in arr {
+        let t = block.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if t == "text" {
+            if let Some(s) = block.get("text").and_then(|x| x.as_str()) {
+                out.push(s.to_string());
+            }
+        } else if t == "tool_result" {
+            if let Some(s) = block.get("content").and_then(|x| x.as_str()) {
+                out.push(s.to_string());
+            } else if let Some(inner) = block.get("content").and_then(|x| x.as_array()) {
+                for ib in inner {
+                    if let Some(s) = ib.get("text").and_then(|x| x.as_str()) {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[tauri::command]
 fn list_sessions() -> Result<Vec<SessionInfo>, String> {
     let projects = match projects_dir() {
@@ -893,7 +1022,8 @@ pub fn run() {
             git_remote_url,
             set_session_title,
             write_text_file,
-            list_tracked_files
+            list_tracked_files,
+            search_sessions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
