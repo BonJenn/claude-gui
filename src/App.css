@@ -1054,6 +1054,59 @@ body[data-resizing="true"] .grid-col-divider::before {
   backdrop-filter: blur(3px);
 }
 
+.terminal-panel {
+  height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--terminal-bg);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.terminal-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 4px 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.terminal-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+
+.terminal-panel-cwd {
+  text-transform: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 440px;
+}
+
+.terminal-panel-body {
+  padding: 6px 8px 2px;
+}
+
+.terminal-panel-body .xterm,
+.terminal-panel-body .xterm-viewport,
+.terminal-panel-body .xterm-screen {
+  height: 100% !important;
+}
+
 .palette-overlay {
   position: fixed;
   inset: 0;

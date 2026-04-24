@@ -7,6 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { TerminalPanel } from "./Terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -480,6 +481,11 @@ function App() {
     resolve: (choice: boolean | null) => void;
   } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  // A single PTY session backs the terminal panel. We keep the same id
+  // across toggles so unmount kills the PTY and a later toggle spawns
+  // a fresh one.
+  const terminalIdRef = useRef<string>(`term-${randomId()}`);
   // Remember the most recent user message so "allow and retry" can
   // replay it after upgrading permission mode.
   const lastUserMessageRef = useRef<string>("");
@@ -668,12 +674,16 @@ function App() {
   }, [gridPanels]);
 
 
-  // ⌘K / Ctrl+K anywhere in the window opens the command palette.
+  // ⌘K / Ctrl+K opens the command palette; ⌘J / Ctrl+J toggles the
+  // integrated terminal panel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
+        e.preventDefault();
+        setTerminalOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1943,6 +1953,15 @@ function App() {
                 setPaletteOpen(false);
               },
             },
+            {
+              id: "toggle-terminal",
+              title: terminalOpen ? "Close terminal" : "Open terminal",
+              hint: "⌘J",
+              run: () => {
+                setTerminalOpen((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
             ...(activeSessionId && entries.length > 0
               ? [
                   {
@@ -2205,6 +2224,14 @@ function App() {
             </button>
             <button
               type="button"
+              className={`btn btn-secondary grid-mode-toggle ${terminalOpen ? "active" : ""}`}
+              onClick={() => setTerminalOpen((v) => !v)}
+              title="toggle integrated terminal (⌘J)"
+            >
+              &gt;_ terminal
+            </button>
+            <button
+              type="button"
               className={`btn btn-secondary grid-mode-toggle ${gridMode ? "active" : ""}`}
               onClick={() => setGridMode((v) => !v)}
               title="grid mode (show up to 6 conversations)"
@@ -2399,6 +2426,30 @@ function App() {
             />
           )}
         </section>
+
+        {terminalOpen && (
+          <div className="terminal-panel">
+            <div className="terminal-panel-head">
+              <span className="terminal-panel-title">
+                terminal
+                <span className="terminal-panel-cwd">{cwd}</span>
+              </span>
+              <button
+                type="button"
+                className="grid-panel-close"
+                onClick={() => setTerminalOpen(false)}
+                title="close terminal (⌘J)"
+              >
+                ×
+              </button>
+            </div>
+            <TerminalPanel
+              terminalId={terminalIdRef.current}
+              cwd={cwd}
+              visible={terminalOpen}
+            />
+          </div>
+        )}
 
         {!gridMode && (
         <footer className={`composer ${dragOver ? "drag-over" : ""}`}>
