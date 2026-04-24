@@ -908,6 +908,38 @@ body[data-resizing="true"] .grid-col-divider::before {
   box-shadow: 0 0 0 1px var(--err);
 }
 
+/* Drag-and-drop reordering */
+.grid-panel.dragging {
+  opacity: 0.45;
+}
+.grid-panel.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+  background: var(--accent-soft);
+}
+.grid-panel-drag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  color: var(--text-faint);
+  cursor: grab;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.grid-panel-drag:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.grid-panel-drag:active {
+  cursor: grabbing;
+}
+
 @keyframes grid-panel-flash {
   0%, 100% {
     border-color: #e89849;

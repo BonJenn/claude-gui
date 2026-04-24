@@ -43,6 +43,13 @@ export function LivePanel({
   onRename,
   onSessionStarted,
   onExpand,
+  dragOver,
+  dragging,
+  onHandleDragStart,
+  onHandleDragEnd,
+  onPanelDragOver,
+  onPanelDragLeave,
+  onPanelDrop,
 }: {
   panelId: string;
   initialSessionId?: string;
@@ -70,6 +77,13 @@ export function LivePanel({
   /** Double-click handler — expand this panel into the main single-view
    *  mode. Only fires once the panel has a real session id. */
   onExpand?: (sessionId: string, cwd: string) => void;
+  dragOver?: boolean;
+  dragging?: boolean;
+  onHandleDragStart?: (e: React.DragEvent<HTMLSpanElement>) => void;
+  onHandleDragEnd?: (e: React.DragEvent<HTMLSpanElement>) => void;
+  onPanelDragOver?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onPanelDragLeave?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onPanelDrop?: (e: React.DragEvent<HTMLDivElement>) => void;
 }) {
   const [entries, setEntries] = useState<Entry[]>(() => {
     if (initialSessionId) {
@@ -614,7 +628,10 @@ export function LivePanel({
       ref={rootRef}
       className={`grid-panel live ${isActive ? "active" : ""} ${
         attention ? `attention-${attention}` : ""
-      }`}
+      } ${dragOver ? "drag-over" : ""} ${dragging ? "dragging" : ""}`}
+      onDragOver={onPanelDragOver}
+      onDragLeave={onPanelDragLeave}
+      onDrop={onPanelDrop}
       onMouseDown={onFocus}
       onDoubleClick={(e) => {
         // Leave the composer and interactive controls alone so their
@@ -644,6 +661,19 @@ export function LivePanel({
       title="double-click to expand into single view"
     >
       <header className="grid-panel-head">
+        {onHandleDragStart && (
+          <span
+            className="grid-panel-drag"
+            draggable
+            onDragStart={onHandleDragStart}
+            onDragEnd={onHandleDragEnd}
+            onMouseDown={(e) => e.stopPropagation()}
+            title="drag to reorder"
+            aria-label="drag to reorder"
+          >
+            ⠿
+          </span>
+        )}
         {onRename && sessionId ? (
           <EditableTitle
             className="grid-panel-title"
