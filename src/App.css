@@ -1296,6 +1296,35 @@ body[data-resizing="true"] .terminal-resizer::after {
   height: 100% !important;
 }
 
+.stuck-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 12;
+  max-width: 560px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.stuck-banner-text {
+  line-height: 1.45;
+}
+
+.stuck-banner-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .palette-overlay {
   position: fixed;
   inset: 0;
