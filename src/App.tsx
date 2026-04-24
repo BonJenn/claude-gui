@@ -561,6 +561,14 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  // Once the user has opened the terminal panel at least once, we keep
+  // its DOM mounted across toggles so the shells (and their scrollback,
+  // running processes, edit history) survive close-and-reopen. Before
+  // the first open we avoid paying the xterm + PTY cost.
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  useEffect(() => {
+    if (terminalOpen) setTerminalMounted(true);
+  }, [terminalOpen]);
   // Per-terminal-tab state. Each entry's id becomes its PTY id; tabs
   // are unmounted when closed, killing their shells.
   const [terminalTabs, setTerminalTabs] = useState<
@@ -1656,6 +1664,7 @@ function App() {
             const e = es[i];
             if (e.kind === "assistant") {
               for (const b of e.blocks) {
+                if (!b) continue;
                 if (b.type === "text") {
                   body = (b as TextBlock).text || "";
                   break;
@@ -2953,10 +2962,10 @@ function App() {
           )}
         </section>
 
-        {terminalOpen && (
+        {terminalMounted && (
           <div
-            className="terminal-panel"
-            style={{ height: `${terminalHeight}px` }}
+            className={`terminal-panel ${terminalOpen ? "" : "hidden"}`}
+            style={{ height: terminalOpen ? `${terminalHeight}px` : 0 }}
           >
             <div
               className="terminal-resizer"
@@ -3078,6 +3087,7 @@ function App() {
               if (e.kind === "assistant") {
                 for (let j = e.blocks.length - 1; j >= 0; j--) {
                   const b = e.blocks[j];
+                  if (!b) continue;
                   if (b.type === "text") {
                     lastText = (b as TextBlock).text || "";
                     break;
@@ -4427,6 +4437,10 @@ const mdComponents = {
 };
 
 function BlockView({ block }: { block: Block }) {
+  // Streaming can leave sparse slots in the blocks array if the CLI
+  // emits `content_block_start` for index N before N-1 lands. Render
+  // nothing for those holes instead of crashing the whole transcript.
+  if (!block) return null;
   if (block.type === "text") {
     const tb = block as TextBlock;
     const text = tb.text ?? "";
