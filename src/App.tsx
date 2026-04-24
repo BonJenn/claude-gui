@@ -1203,6 +1203,19 @@ function App() {
   // clobber a newer one if the user clicks quickly.
   const resumeTokenRef = useRef(0);
 
+  // Mirror live single-view entries into sessionCacheRef so that flipping
+  // back to grid mode shows messages typed/streamed while in single view.
+  // Without this, the grid LivePanel reads a snapshot frozen at the
+  // resume-time replay and looks stale.
+  useEffect(() => {
+    if (!activeSessionId) return;
+    sessionCacheRef.current.set(activeSessionId, {
+      entries,
+      toolUseMap: new Map(toolUseMapRef.current),
+      mtime_ms: Date.now(),
+    });
+  }, [entries, activeSessionId]);
+
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
   }, []);
@@ -2850,9 +2863,15 @@ function App() {
               );
               refreshSessions();
             }}
-            onExpand={(sid, panelCwd) => {
-              // Double-click on a grid tile: leave grid mode and load
-              // that session in the single-view transcript.
+            onExpand={async (sid, panelCwd, panelId) => {
+              // Double-click on a grid tile: hand off ownership to
+              // single-view. The grid LivePanel's unmount cleanup also
+              // calls stop_session, but it's fire-and-forget and races
+              // the start_session below — without an explicit await the
+              // single-writer gate rejects with "already open".
+              try {
+                await invoke("stop_session", { panelId });
+              } catch {}
               setGridMode(false);
               resumeSession(sid, panelCwd);
             }}
@@ -5088,7 +5107,7 @@ function LiveGrid({
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onReorder: (fromId: string, toId: string) => void;
   onSessionStarted: (panelId: string, sessionId: string) => void;
-  onExpand: (sessionId: string, cwd: string) => void;
+  onExpand: (sessionId: string, cwd: string, panelId: string) => void;
 }) {
   // Draggable divider between the two rows lets the user rebalance tile
   // heights. `topFraction` is null until the user drags — then it takes

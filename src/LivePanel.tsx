@@ -76,8 +76,10 @@ export function LivePanel({
   onRename?: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted?: (panelId: string, sessionId: string) => void;
   /** Double-click handler — expand this panel into the main single-view
-   *  mode. Only fires once the panel has a real session id. */
-  onExpand?: (sessionId: string, cwd: string) => void;
+   *  mode. Only fires once the panel has a real session id. The panelId
+   *  is forwarded so the parent can stop this grid subprocess before
+   *  the single-view start_session trips the single-writer gate. */
+  onExpand?: (sessionId: string, cwd: string, panelId: string) => void;
   dragOver?: boolean;
   dragging?: boolean;
   onHandleDragStart?: (e: React.DragEvent<HTMLSpanElement>) => void;
@@ -688,7 +690,7 @@ export function LivePanel({
             toolUseMap: new Map(toolUseMap),
             mtime_ms: initialMtime ?? Date.now(),
           });
-          onExpand(sessionId, initialCwd);
+          onExpand(sessionId, initialCwd, panelId);
         }
       }}
       title="double-click to expand into single view"
