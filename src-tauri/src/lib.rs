@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -13,11 +13,21 @@ struct Session {
     stdin: ChildStdin,
 }
 
+// Live PTY-backed terminal. The master writer is wrapped in a std Mutex
+// because portable_pty's writer isn't Send+Sync-friendly for tokio's
+// async Mutex, and we only ever touch it from blocking threads.
+struct Terminal {
+    writer: Arc<StdMutex<Box<dyn std::io::Write + Send>>>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
 #[derive(Default)]
 struct AppState {
     // Each panel gets its own claude subprocess, keyed by a frontend-supplied
     // panel_id. In single-panel mode the frontend uses the literal "main".
     sessions: Arc<Mutex<HashMap<String, Session>>>,
+    terminals: Arc<StdMutex<HashMap<String, Terminal>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -250,6 +260,160 @@ async fn send_raw(
 #[tauri::command]
 fn write_text_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("write failed: {}", e))
+}
+
+#[tauri::command]
+fn terminal_spawn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    terminal_id: String,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    // If this id already exists, kill the old one first so the
+    // frontend can hot-reload without leaking subprocesses.
+    {
+        let mut terms = state.terminals.lock().map_err(|e| e.to_string())?;
+        if let Some(mut old) = terms.remove(&terminal_id) {
+            let _ = old.child.kill();
+        }
+    }
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("openpty failed: {}", e))?;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let mut cmd = CommandBuilder::new(&shell);
+    // Interactive login-ish shell so the user's PATH/aliases load.
+    cmd.arg("-l");
+    let effective_cwd = if !cwd.is_empty() && std::path::Path::new(&cwd).is_dir() {
+        cwd
+    } else {
+        std::env::var("HOME").unwrap_or_else(|_| "/".into())
+    };
+    cmd.cwd(&effective_cwd);
+    // Encourage color + dumb-terminal-friendly output from most CLIs.
+    cmd.env("TERM", "xterm-256color");
+    if let Ok(lang) = std::env::var("LANG") {
+        cmd.env("LANG", lang);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("spawn failed: {}", e))?;
+
+    // Detach the slave end so it can be closed by the child; we only
+    // hold the master side for IO.
+    drop(pair.slave);
+
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("take_writer failed: {}", e))?;
+
+    // Spawn a blocking reader thread that forwards bytes as `terminal-output`
+    // events to the frontend.
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("try_clone_reader failed: {}", e))?;
+    let id_for_thread = terminal_id.clone();
+    let app_for_thread = app.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = app_for_thread.emit(
+                        "terminal-output",
+                        serde_json::json!({
+                            "terminal_id": id_for_thread,
+                            "data": chunk,
+                        }),
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app_for_thread.emit(
+            "terminal-exit",
+            serde_json::json!({ "terminal_id": id_for_thread }),
+        );
+    });
+
+    let mut terms = state.terminals.lock().map_err(|e| e.to_string())?;
+    terms.insert(
+        terminal_id,
+        Terminal {
+            writer: Arc::new(StdMutex::new(writer)),
+            master: pair.master,
+            child,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn terminal_write(
+    state: State<'_, AppState>,
+    terminal_id: String,
+    data: String,
+) -> Result<(), String> {
+    let terms = state.terminals.lock().map_err(|e| e.to_string())?;
+    let term = terms
+        .get(&terminal_id)
+        .ok_or_else(|| format!("no terminal {}", terminal_id))?;
+    let mut writer = term.writer.lock().map_err(|e| e.to_string())?;
+    use std::io::Write;
+    writer
+        .write_all(data.as_bytes())
+        .map_err(|e| format!("write failed: {}", e))?;
+    writer.flush().ok();
+    Ok(())
+}
+
+#[tauri::command]
+fn terminal_resize(
+    state: State<'_, AppState>,
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    use portable_pty::PtySize;
+    let terms = state.terminals.lock().map_err(|e| e.to_string())?;
+    let term = terms
+        .get(&terminal_id)
+        .ok_or_else(|| format!("no terminal {}", terminal_id))?;
+    term.master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("resize failed: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn terminal_kill(state: State<'_, AppState>, terminal_id: String) -> Result<(), String> {
+    let mut terms = state.terminals.lock().map_err(|e| e.to_string())?;
+    if let Some(mut t) = terms.remove(&terminal_id) {
+        let _ = t.child.kill();
+    }
+    Ok(())
 }
 
 // List tracked (and new, non-ignored) files under `cwd` via
@@ -1023,7 +1187,11 @@ pub fn run() {
             set_session_title,
             write_text_file,
             list_tracked_files,
-            search_sessions
+            search_sessions,
+            terminal_spawn,
+            terminal_write,
+            terminal_resize,
+            terminal_kill
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
