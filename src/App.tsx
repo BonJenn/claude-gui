@@ -5091,16 +5091,19 @@ function LiveGrid({
   onExpand: (sessionId: string, cwd: string) => void;
 }) {
   // Draggable divider between the two rows lets the user rebalance tile
-  // heights. Stored as a fraction of the grid's height taken by the top
-  // row (between 0.15 and 0.85 so tiles never fully collapse).
+  // heights. `topFraction` is null until the user drags — then it takes
+  // over. Before that, we pick a sensible default based on how many
+  // panels are in play (lean toward a taller top row when the bottom
+  // row is mostly just the `+ new panel` affordance).
   const containerRef = useRef<HTMLElement>(null);
-  const [topFraction, setTopFraction] = useState<number>(() => {
+  const [topFraction, setTopFraction] = useState<number | null>(() => {
     const raw = localStorage.getItem("gridRowTopFraction");
     const n = raw ? parseFloat(raw) : NaN;
-    if (!Number.isFinite(n)) return 0.5;
+    if (!Number.isFinite(n)) return null;
     return Math.max(0.15, Math.min(0.85, n));
   });
   useEffect(() => {
+    if (topFraction === null) return;
     localStorage.setItem("gridRowTopFraction", String(topFraction));
   }, [topFraction]);
   const onRowDividerPointerDown = useCallback(
@@ -5248,8 +5251,14 @@ function LiveGrid({
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3;
   const rowCount = Math.ceil(tileCount / columns);
   const showRowDivider = rowCount >= 2;
+  // Default: when the bottom row is mostly just the add-tile button
+  // (≤ 2 actual panels in a 2-col layout), bias the top row to 3/4 of
+  // the height so the working panels aren't squeezed. Once the user
+  // drags the divider, their value wins.
+  const defaultTopFraction = panels.length <= 2 ? 0.75 : 0.5;
+  const effectiveTopFraction = topFraction ?? defaultTopFraction;
   const gridTemplateRows = showRowDivider
-    ? `${topFraction}fr ${1 - topFraction}fr`
+    ? `${effectiveTopFraction}fr ${1 - effectiveTopFraction}fr`
     : undefined;
   const colWeights =
     (columns > 1 && colWeightsByCount[columns]?.length === columns
@@ -5367,7 +5376,7 @@ function LiveGrid({
       {showRowDivider && (
         <div
           className="grid-row-divider"
-          style={{ top: `${(topFraction * 100).toFixed(2)}%` }}
+          style={{ top: `${(effectiveTopFraction * 100).toFixed(2)}%` }}
           onPointerDown={onRowDividerPointerDown}
           role="separator"
           aria-orientation="horizontal"
