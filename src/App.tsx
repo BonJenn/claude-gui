@@ -656,6 +656,10 @@ function App() {
   // auth file at startup.
   const [authErrorSeen, setAuthErrorSeen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // When busy stays true for a long time with no new entries landing,
+  // surface a banner so the user can interrupt / reset instead of
+  // waiting forever on a wedged subprocess.
+  const [stuckBusy, setStuckBusy] = useState(false);
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [showStderr, setShowStderr] = useState(false);
   const [stuckToBottom, setStuckToBottom] = useState(true);
@@ -685,6 +689,16 @@ function App() {
     () => allTranscripts.get(activeSessionId ?? NEW_SESSION_KEY) ?? [],
     [allTranscripts, activeSessionId],
   );
+  // Watchdog: flip `stuckBusy` to true if busy stays true for 30s
+  // without a new entry landing. Resets every time entries change.
+  useEffect(() => {
+    if (!busy) {
+      setStuckBusy(false);
+      return;
+    }
+    const handle = window.setTimeout(() => setStuckBusy(true), 30_000);
+    return () => window.clearTimeout(handle);
+  }, [busy, entries.length, activeSessionId]);
   const setEntries = useCallback(
     (update: Entry[] | ((prev: Entry[]) => Entry[])) => {
       setAllTranscripts((prev) => {
@@ -2132,6 +2146,34 @@ function App() {
     }
   }
 
+  // Hard reset: kill whatever subprocess the "main" panel has and
+  // respawn it in the active session. Used when a turn wedges and
+  // interrupt alone doesn't bring the panel back.
+  async function resetMainSession() {
+    setBusy(false);
+    setStuckBusy(false);
+    try {
+      await invoke("stop_session", { panelId: "main" });
+    } catch {
+      // ignore — we're about to respawn anyway
+    }
+    try {
+      await invoke("start_session", {
+        panelId: "main",
+        cwd,
+        permissionMode,
+        model: model || null,
+        resumeId: activeSessionId || null,
+      });
+      setSessionOn(true);
+    } catch (e) {
+      setEntries((es) => [
+        ...es,
+        { kind: "system", id: randomId(), text: `reset failed: ${e}` },
+      ]);
+    }
+  }
+
   // Fire a short user reply without touching the composer input — used
   // by the yes/no quick-reply buttons. Mirrors send() minus the input
   // and attachment handling.
@@ -2182,12 +2224,18 @@ function App() {
 
     if (!sessionOn) {
       try {
+        // Resume the session the user is looking at if there is one;
+        // otherwise start fresh. Previously we always passed
+        // resumeId:null, which meant sending mid-resume spawned a
+        // brand-new subprocess pointed at a session the UI wasn't
+        // displaying — leading to "thinking forever" on the visible
+        // transcript.
         await invoke("start_session", {
           panelId: "main",
           cwd,
           permissionMode,
           model: model || null,
-          resumeId: null,
+          resumeId: activeSessionId || null,
         });
         setSessionOn(true);
       } catch (e) {
@@ -2808,6 +2856,30 @@ function App() {
             >
               ↓
             </button>
+          )}
+          {stuckBusy && (
+            <div className="stuck-banner" role="status">
+              <span className="stuck-banner-text">
+                claude has been thinking for 30+ seconds with no output —
+                the subprocess may be wedged.
+              </span>
+              <div className="stuck-banner-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={interruptTurn}
+                >
+                  Interrupt
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={resetMainSession}
+                >
+                  Reset session
+                </button>
+              </div>
+            </div>
           )}
           {pendingPermission && (
             <PermissionPromptOverlay
