@@ -307,6 +307,44 @@ fn write_text_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("write failed: {}", e))
 }
 
+// Saves bytes from a web-drop — an in-browser File blob that the OS
+// never handed us a native filesystem path for (screenshots from a
+// menu bar app, images dragged from a webpage, etc.) — into a temp
+// file and returns its full path. The caller then attaches the path
+// to the chat message the same way a real filesystem drop does.
+#[tauri::command]
+fn save_dropped_file(name: String, bytes: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let safe_name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let fallback = if safe_name.trim().is_empty() {
+        "dropped.bin".to_string()
+    } else {
+        safe_name
+    };
+    // Short time-based prefix so the same name dropped twice doesn't
+    // clobber the first copy.
+    let prefix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join("blackcrab-drops");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir temp: {}", e))?;
+    let path = dir.join(format!("{:x}-{}", prefix, fallback));
+    let mut file = std::fs::File::create(&path).map_err(|e| format!("create: {}", e))?;
+    file.write_all(&bytes).map_err(|e| format!("write: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn terminal_spawn(
     app: AppHandle,
@@ -1277,6 +1315,7 @@ pub fn run() {
             set_session_title,
             delete_session,
             write_text_file,
+            save_dropped_file,
             list_tracked_files,
             search_sessions,
             terminal_spawn,
