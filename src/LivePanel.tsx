@@ -118,7 +118,7 @@ export function LivePanel({
   // Panel's current permission mode — starts at the prop, can change
   // if we restart the subprocess for "allow and retry".
   const currentModeRef = useRef(permissionMode);
-  // Attention state for the tile border: flashing orange when claude is
+  // Attention state for the tile border: flashing amber when claude is
   // waiting on the user (permission prompt), green when a task just
   // finished successfully, red on error. Clears when the user focuses
   // the panel so it's acknowledge-on-click.
@@ -131,6 +131,20 @@ export function LivePanel({
   useEffect(() => {
     if (!pendingPermission && attention === "permission") setAttention(null);
   }, [pendingPermission, attention]);
+  // Short-lived "done" window after a successful turn. The border-glow
+  // version of attention stays until the user clicks; the header status
+  // label auto-fades to idle so it's not lying about the current state
+  // indefinitely.
+  const [justCompleted, setJustCompleted] = useState(false);
+  useEffect(() => {
+    if (attention !== "completed") {
+      setJustCompleted(false);
+      return;
+    }
+    setJustCompleted(true);
+    const t = window.setTimeout(() => setJustCompleted(false), 4000);
+    return () => window.clearTimeout(t);
+  }, [attention]);
   // Listen for files dropped onto this tile. App's global drag-drop
   // handler hit-tests the cursor position and dispatches a CustomEvent
   // on the tile under the pointer; we pick it up here and grow the
@@ -628,6 +642,19 @@ export function LivePanel({
   }, [panelId]);
 
   const project = initialCwd.split("/").filter(Boolean).pop() || initialCwd;
+  // Persistent per-panel status label. Drawn from the same signals
+  // the transient border-glow (`attention`) already uses, so they
+  // stay in sync.
+  const status: "error" | "waiting" | "thinking" | "done" | "idle" =
+    attention === "error"
+      ? "error"
+      : pendingPermission
+      ? "waiting"
+      : busy
+      ? "thinking"
+      : justCompleted
+      ? "done"
+      : "idle";
 
   return (
     <div
@@ -697,6 +724,14 @@ export function LivePanel({
           </div>
         )}
         <div className="grid-panel-meta">
+          <span
+            className={`panel-status panel-status-${status}`}
+            title={`status: ${status}`}
+            aria-label={`status: ${status}`}
+          >
+            <span className="panel-status-dot" />
+            <span className="panel-status-label">{status}</span>
+          </span>
           <span className={`dot ${sessionOn ? "on" : "off"}`} />
           <span className="grid-panel-project">{project}</span>
           <button

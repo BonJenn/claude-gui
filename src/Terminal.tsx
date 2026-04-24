@@ -35,9 +35,9 @@ export function TerminalPanel({
         'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace',
       fontSize: 12.5,
       theme: {
-        background: "#0a0c11",
-        foreground: "#e6e8ee",
-        cursor: "#c67f45",
+        background: "#080808",
+        foreground: "#ededed",
+        cursor: "#e94545",
       },
       allowProposedApi: true,
     });

@@ -970,6 +970,30 @@ fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
     Ok(out)
 }
 
+fn build_preview(snippet: &str, pos: usize, needle_len: usize) -> String {
+    let len = snippet.len();
+    if len == 0 {
+        return String::new();
+    }
+    let pos = pos.min(len);
+    let mut start = pos.saturating_sub(40);
+    let mut end = (pos.saturating_add(needle_len).saturating_add(80)).min(len);
+    while start < len && !snippet.is_char_boundary(start) {
+        start += 1;
+    }
+    while end < len && !snippet.is_char_boundary(end) {
+        end += 1;
+    }
+    if end > len {
+        end = len;
+    }
+    if start > end {
+        start = end;
+    }
+    let slice = snippet.get(start..end).unwrap_or("");
+    slice.replace('\n', " ").trim().to_string()
+}
+
 fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionSearchHit> {
     let session_id = path.file_stem()?.to_string_lossy().to_string();
     let file = std::fs::File::open(path).ok()?;
@@ -996,14 +1020,7 @@ fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionSear
             if let Some(pos) = haystack.find(needle) {
                 match_count += 1;
                 if preview.is_empty() {
-                    let start = pos.saturating_sub(40);
-                    let end = (pos + needle.len() + 80).min(snippet.len());
-                    preview = snippet
-                        .get(start..end)
-                        .unwrap_or(&snippet[..snippet.len().min(120)])
-                        .replace('\n', " ")
-                        .trim()
-                        .to_string();
+                    preview = build_preview(&snippet, pos, needle.len());
                 }
             }
         }
