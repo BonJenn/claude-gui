@@ -1054,6 +1054,128 @@ body[data-resizing="true"] .grid-col-divider::before {
   backdrop-filter: blur(3px);
 }
 
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  backdrop-filter: blur(3px);
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+
+.palette-card {
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.palette-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 14px 18px;
+  font-family: var(--sans);
+  font-size: 15px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.palette-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.palette-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.palette-kind {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.palette-kind-cmd {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.palette-kind-session {
+  background: var(--user-soft);
+  color: var(--user);
+}
+
+.palette-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-hint {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.palette-preview {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 4px 0 0 34px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.palette-footer {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
 .auth-error-overlay {
   position: fixed;
   inset: 0;
