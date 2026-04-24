@@ -215,6 +215,21 @@ export function LivePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSessionId, initialCwd]);
 
+  // Mirror live entries into the shared sessionCache so that switching
+  // to this session in single view (via sidebar click or palette) shows
+  // the most recent messages. Without this, the cache only ever holds
+  // whatever the lazy loader wrote on mount and misses streaming
+  // updates that happened while the tile was open.
+  useEffect(() => {
+    const id = sessionId || initialSessionId;
+    if (!id) return;
+    sessionCache.set(id, {
+      entries,
+      toolUseMap,
+      mtime_ms: Date.now(),
+    });
+  }, [entries, sessionId, initialSessionId, toolUseMap, sessionCache]);
+
   const handleEvent = useCallback(
     (ev: StreamEvent) => {
       // Claude asks the frontend for permission via control_request /
