@@ -818,6 +818,7 @@ input:disabled, select:disabled, textarea:disabled {
 .transcript.plain {
   overflow-y: auto;
   overscroll-behavior: contain;
+  overflow-anchor: none;
 }
 
 /* ---------- grid mode ---------- */

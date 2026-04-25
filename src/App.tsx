@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -735,12 +744,15 @@ function App() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [activeSessionId, _setActiveSessionIdState] =
     useState<string | undefined>();
+  const [sidebarSelectedSessionId, setSidebarSelectedSessionId] =
+    useState<string | undefined>();
   // Ref mirror of activeSessionId so setEntries (called from event
   // listener closures that captured an older id) routes the update
   // to the right transcript slot before React commits.
   const activeSessionIdRef = useRef<string | undefined>(undefined);
   const setActiveSessionId = useCallback((id: string | undefined) => {
     activeSessionIdRef.current = id;
+    setSidebarSelectedSessionId(id);
     _setActiveSessionIdState(id);
   }, []);
   // Keep-alive map of recent sessions' transcripts. Holds the ACTIVE
@@ -1261,12 +1273,40 @@ function App() {
   // Tracks which resume attempt is latest so an older slow load doesn't
   // clobber a newer one if the user clicks quickly.
   const resumeTokenRef = useRef(0);
+  const sidebarResumeSeqRef = useRef(0);
 
   // In-flight start_session promise. resumeSession kicks one off in the
   // background and stores it here; send/sendQuickReply await it before
   // dispatching send_message so the visible session click doesn't block
   // on subprocess boot. Cleared once the promise settles.
   const startPromiseRef = useRef<Promise<unknown> | null>(null);
+  const transcriptScrollSeqRef = useRef(0);
+  const [transcriptScrollRequest, setTranscriptScrollRequest] = useState<{
+    sessionId: string;
+    seq: number;
+  } | null>(null);
+  const requestTranscriptBottom = useCallback((sessionId: string) => {
+    transcriptScrollSeqRef.current += 1;
+    setTranscriptScrollRequest({
+      sessionId,
+      seq: transcriptScrollSeqRef.current,
+    });
+  }, []);
+  const scrollTranscriptToBottomNow = useCallback(() => {
+    const snap = () => {
+      const el = transcriptScrollRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      setStuckToBottom(true);
+      setHasNewBelow(false);
+    };
+    snap();
+    requestAnimationFrame(() => {
+      snap();
+      requestAnimationFrame(snap);
+    });
+    window.setTimeout(snap, 80);
+  }, []);
 
   // Mirror live single-view entries into sessionCacheRef so that flipping
   // back to grid mode shows messages typed/streamed while in single view.
@@ -2210,26 +2250,23 @@ function App() {
     const cacheHit = !!cached && cached.entries.length > 0;
     log(`cache=${cacheHit ? "HIT" : "MISS"} entries=${cached?.entries.length ?? 0}`);
 
-    // ---------- Single synchronous batch: swap entire view in one render ----------
-    // Everything below runs before any await so React 18 batches them into a
-    // single commit. If it's a cache hit, the transcript hops directly from
-    // the previous session's entries to the resumed ones — no empty flash,
-    // no startTransition delay, no "loading…" placeholder.
-    switchingSessionRef.current = true;
-    if (sessionModel) setModel(sessionModel);
-    if (sessionPermissionMode) setPermissionMode(sessionPermissionMode);
-    setSessionOn(false);
-    setActiveSessionId(sessionId);
-    if (sessionCwd) setCwd(sessionCwd);
-    setStderrLines([]);
-    setSessionMeta(null);
-    setBusy(false);
-    setStuckToBottom(true);
-    setHasNewBelow(false);
-    setPreviewOpen(false);
-    setPreviewUrl("");
-    seenUrlsRef.current.clear();
-    streamingIdRef.current = null;
+    const applyResumeState = () => {
+      switchingSessionRef.current = true;
+      if (sessionModel) setModel(sessionModel);
+      if (sessionPermissionMode) setPermissionMode(sessionPermissionMode);
+      setSessionOn(false);
+      setActiveSessionId(sessionId);
+      if (sessionCwd) setCwd(sessionCwd);
+      setStderrLines([]);
+      setSessionMeta(null);
+      setBusy(false);
+      setStuckToBottom(true);
+      setHasNewBelow(false);
+      setPreviewOpen(false);
+      setPreviewUrl("");
+      seenUrlsRef.current.clear();
+      streamingIdRef.current = null;
+    };
 
     if (cacheHit) {
       toolUseMapRef.current = new Map(cached!.toolUseMap);
@@ -2241,26 +2278,30 @@ function App() {
       // already makes it visible.
       const existingSlot = allTranscripts.get(sessionId);
       const alreadyMounted = !!existingSlot && existingSlot.length > 0;
-      if (!alreadyMounted) {
-        // PlainTranscript only renders the tail window by default (see
-        // TRANSCRIPT_WINDOW), so mounting a full cached-entry array is
-        // cheap regardless of conversation length — no progressive
-        // mount needed.
-        setEntries([
-          ...cached!.entries,
-          { kind: "system", id: randomId(), text: "— resumed —" },
-        ]);
-      }
-      setResumingId(null);
-      requestAnimationFrame(() => {
-        const el = transcriptScrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+      flushSync(() => {
+        applyResumeState();
+        if (!alreadyMounted) {
+          // PlainTranscript only renders the tail window by default (see
+          // TRANSCRIPT_WINDOW), so mounting a full cached-entry array is
+          // cheap regardless of conversation length — no progressive
+          // mount needed.
+          setEntries([
+            ...cached!.entries,
+            { kind: "system", id: randomId(), text: "— resumed —" },
+          ]);
+        }
+        setResumingId(null);
+        requestTranscriptBottom(sessionId);
       });
+      scrollTranscriptToBottomNow();
     } else {
       toolUseMapRef.current = new Map();
       toolUseMapGlobal.current = toolUseMapRef.current;
-      setEntries([]);
-      setResumingId(sessionId);
+      flushSync(() => {
+        applyResumeState();
+        setEntries([]);
+        setResumingId(sessionId);
+      });
     }
 
     const useCwd = sessionCwd || cwd;
@@ -2339,6 +2380,7 @@ function App() {
           precompileMarkdown: false,
         });
         log(`buildHistory done entries=${history.length}`);
+        if (!isLatest()) return;
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
@@ -2346,14 +2388,14 @@ function App() {
         });
         toolUseMapRef.current = new Map(toolUseMap);
         toolUseMapGlobal.current = toolUseMapRef.current;
-        setEntries([
-          ...history,
-          { kind: "system", id: randomId(), text: "— resumed —" },
-        ]);
-        requestAnimationFrame(() => {
-          const el = transcriptScrollRef.current;
-          if (el) el.scrollTop = el.scrollHeight;
+        flushSync(() => {
+          setEntries([
+            ...history,
+            { kind: "system", id: randomId(), text: "— resumed —" },
+          ]);
+          requestTranscriptBottom(sessionId);
         });
+        scrollTranscriptToBottomNow();
       } catch (e) {
         if (isLatest()) {
           setEntries((es) => [
@@ -2695,7 +2737,14 @@ function App() {
       }
       setSelectedGridPanelId(id);
     } else {
-      resumeSession(id, cwd);
+      const seq = ++sidebarResumeSeqRef.current;
+      flushSync(() => setSidebarSelectedSessionId(id));
+      requestAnimationFrame(() => {
+        window.setTimeout(() => {
+          if (sidebarResumeSeqRef.current !== seq) return;
+          resumeSession(id, cwd);
+        }, 0);
+      });
     }
   });
   const onSidebarNew = useEvent(() => {
@@ -2705,7 +2754,7 @@ function App() {
     ? selectedGridPanelId
       ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
       : undefined
-    : activeSessionId;
+    : sidebarSelectedSessionId ?? activeSessionId;
   const shouldShowOnboarding =
     onboardingForced ||
     (!onboardingDismissed &&
@@ -3142,6 +3191,11 @@ function App() {
                   busy={isActive ? busy : false}
                   scrollRef={isActive ? transcriptScrollRef : noopScrollRef}
                   onAtBottomChange={isActive ? handleAtBottomChange : noop}
+                  scrollToBottomToken={
+                    isActive && transcriptScrollRequest?.sessionId === id
+                      ? transcriptScrollRequest.seq
+                      : 0
+                  }
                 />
               </div>
             );
@@ -4512,7 +4566,23 @@ function renderSessionItem(
         else ctx.itemRefs.current.delete(s.id);
       }}
       className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
-      onClick={() => ctx.onResume(s.id, s.cwd)}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        const target = e.target as HTMLElement | null;
+        if (
+          target?.closest(
+            ".session-delete, .editable-title, .editable-title-input",
+          )
+        ) {
+          return;
+        }
+        e.preventDefault();
+        e.currentTarget.focus();
+        ctx.onResume(s.id, s.cwd);
+      }}
+      onClick={(e) => {
+        if (e.detail === 0) ctx.onResume(s.id, s.cwd);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -6176,11 +6246,13 @@ const PlainTranscript = memo(function PlainTranscript({
   busy,
   scrollRef,
   onAtBottomChange,
+  scrollToBottomToken,
 }: {
   entries: Entry[];
   busy: boolean;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   onAtBottomChange: (atBottom: boolean) => void;
+  scrollToBottomToken: number;
 }) {
   const [windowSize, setWindowSize] = useState(TRANSCRIPT_WINDOW);
   // Stream new turns should auto-extend the window so live replies
@@ -6201,6 +6273,27 @@ const PlainTranscript = memo(function PlainTranscript({
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
   }, [onAtBottomChange, scrollRef]);
+
+  useLayoutEffect(() => {
+    if (!scrollToBottomToken) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    const snap = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      onAtBottomChange(true);
+    };
+    snap();
+    raf1 = requestAnimationFrame(() => {
+      snap();
+      raf2 = requestAnimationFrame(snap);
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [scrollToBottomToken, scrollRef, onAtBottomChange]);
 
   const total = entries.length;
   const visible =
