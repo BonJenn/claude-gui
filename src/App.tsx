@@ -16,6 +16,8 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { TerminalPanel } from "./Terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
@@ -29,8 +31,10 @@ import {
   respondPermission,
   type PermissionRequest,
 } from "./LivePanel";
-import { subscribeToasts, type Toast, notifyErr } from "./toast";
+import { subscribeToasts, type Toast, notify, notifyErr } from "./toast";
 import "./App.css";
+
+type AvailableUpdate = NonNullable<Awaited<ReturnType<typeof check>>>;
 
 export type TextBlock = {
   type: "text";
@@ -732,6 +736,12 @@ function App() {
   const [claudePreflightLoading, setClaudePreflightLoading] = useState(true);
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   const [onboardingForced, setOnboardingForced] = useState(false);
+  const [availableUpdate, setAvailableUpdate] =
+    useState<AvailableUpdate | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const updateCheckingRef = useRef(false);
   const [busy, setBusy] = useState(false);
   // When busy stays true for a long time with no new entries landing,
   // surface a banner so the user can interrupt / reset instead of
@@ -1357,6 +1367,53 @@ function App() {
   useEffect(() => {
     void refreshClaudePreflight();
   }, [refreshClaudePreflight]);
+
+  const checkForUpdates = useCallback(async (manual = false) => {
+    if (updateCheckingRef.current) return;
+    updateCheckingRef.current = true;
+    setUpdateChecking(true);
+    try {
+      const update = await check();
+      if (update) {
+        setAvailableUpdate(update);
+        setUpdateDismissed(false);
+        if (manual) {
+          notify(`Blackcrab ${update.version} is available`, "info");
+        }
+      } else if (manual) {
+        notify("Blackcrab is up to date", "success");
+      }
+    } catch (e) {
+      if (manual) {
+        notifyErr("update check failed")(e);
+      } else {
+        console.error("update check failed", e);
+      }
+    } finally {
+      updateCheckingRef.current = false;
+      setUpdateChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void checkForUpdates(false);
+    }, 2500);
+    return () => window.clearTimeout(t);
+  }, [checkForUpdates]);
+
+  const installAvailableUpdate = useCallback(async () => {
+    if (!availableUpdate || updateInstalling) return;
+    setUpdateInstalling(true);
+    try {
+      await availableUpdate.downloadAndInstall();
+      notify("Update installed. Restarting Blackcrab...", "success");
+      await relaunch();
+    } catch (e) {
+      setUpdateInstalling(false);
+      notifyErr("update install failed")(e);
+    }
+  }, [availableUpdate, updateInstalling]);
 
   // Only flag "new content below" when the entry count grows while we
   // are NOT stuck to the bottom. Depending on stuckToBottom here would
@@ -2768,6 +2825,14 @@ function App() {
   return (
     <div className="root">
       <ToastHost />
+      {availableUpdate && !updateDismissed && (
+        <UpdateBanner
+          version={availableUpdate.version}
+          installing={updateInstalling}
+          onInstall={installAvailableUpdate}
+          onDismiss={() => setUpdateDismissed(true)}
+        />
+      )}
       {shouldShowOnboarding && (
           <ClaudeOnboardingOverlay
             status={claudePreflight}
@@ -2831,6 +2896,15 @@ function App() {
                 setOnboardingDismissed(false);
                 setOnboardingForced(true);
                 void refreshClaudePreflight();
+              },
+            },
+            {
+              id: "check-updates",
+              title: updateChecking ? "Checking for updates..." : "Check for updates",
+              hint: "update",
+              run: () => {
+                setPaletteOpen(false);
+                void checkForUpdates(true);
               },
             },
             {
@@ -3639,6 +3713,45 @@ function ToastHost() {
           {t.msg}
         </div>
       ))}
+    </div>
+  );
+}
+
+function UpdateBanner({
+  version,
+  installing,
+  onInstall,
+  onDismiss,
+}: {
+  version: string;
+  installing: boolean;
+  onInstall: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="update-banner" role="status">
+      <div className="update-banner-copy">
+        <strong>Blackcrab {version} is available</strong>
+        <span>Install the update and restart when you are ready.</span>
+      </div>
+      <div className="update-banner-actions">
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={onDismiss}
+          disabled={installing}
+        >
+          Later
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onInstall}
+          disabled={installing}
+        >
+          {installing ? "Installing..." : "Install"}
+        </button>
+      </div>
     </div>
   );
 }

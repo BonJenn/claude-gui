@@ -59,6 +59,23 @@ npm run tauri -- build
 `npm run dev` starts only the Vite frontend. Use `npm run tauri -- dev` for the
 desktop app.
 
+## Downloads and Updates
+
+Release installers are published through GitHub Releases. The landing site can
+link to `https://github.com/BonJenn/blackcrab/releases/latest`, or to its own
+stable redirect route such as `/download/macos`.
+
+Blackcrab is wired for Tauri's updater plugin. Release builds generate updater
+artifacts and `latest.json` when `TAURI_SIGNING_PRIVATE_KEY` is available to
+the build environment. The app checks the latest release endpoint:
+
+```text
+https://github.com/BonJenn/blackcrab/releases/latest/download/latest.json
+```
+
+See `RELEASE.md` for the full release, signing, notarization, and download
+tracking workflow.
+
 ## How It Works
 
 The frontend is React and Vite. The desktop shell and native commands are Tauri

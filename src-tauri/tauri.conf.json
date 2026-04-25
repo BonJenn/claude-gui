@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Blackcrab",
   "version": "0.1.0",
-  "identifier": "com.blackcrab.app",
+  "identifier": "com.bonjenn.blackcrab",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -34,5 +35,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGMTIyRjAyODA0NzA2QTEKUldTaEJrZUFBaThTbjk1OVJNb1BGRy9uL3hBTHk5RURPeXY3bE5qVnVQTHhFa1U2SnJrUkFIdXEK",
+      "endpoints": [
+        "https://github.com/BonJenn/blackcrab/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
