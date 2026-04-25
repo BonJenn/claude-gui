@@ -147,7 +147,6 @@ body {
 
 .topbar {
   min-width: 0;
-  overflow: hidden;
 }
 
 /* ---------- sidebar ---------- */
@@ -618,50 +617,76 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 16px;
+  gap: 12px;
+  padding: 8px 14px;
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--text);
   white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.brand-logo {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  flex: 0 0 auto;
 }
 
 .controls {
   display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  flex: 1;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 0;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  flex: 1;
-  max-width: 440px;
+  flex: 1 1 220px;
+  max-width: 420px;
 }
 
 .field-sm {
-  flex: 0 0 auto;
-  min-width: 130px;
-  max-width: 160px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: none;
 }
 
 .field > span {
-  font-size: 11px;
+  font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-faint);
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.field > input,
+.field > select,
+.field > .cwd-row {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .dirty-dot {
@@ -679,8 +704,8 @@ body {
   border-radius: 6px;
   overflow: hidden;
   background: var(--bg-elev-2);
-  align-self: flex-end;
-  margin-bottom: 0;
+  align-self: center;
+  flex: 0 0 auto;
 }
 
 .theme-btn {
@@ -826,7 +851,8 @@ input:disabled, select:disabled, textarea:disabled {
 .grid-mode-toggle {
   padding: 6px 12px;
   font-size: 12px;
-  align-self: flex-end;
+  align-self: center;
+  flex: 0 0 auto;
 }
 
 .grid-mode-toggle.active {

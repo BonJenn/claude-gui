@@ -22,6 +22,7 @@ import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { compileMarkdown } from "./markdown";
+import blackcrabLogo from "../blackcrab_logo.png";
 import {
   LivePanel,
   setPermissionModeOnPanel,
@@ -2930,7 +2931,10 @@ function App() {
       />
       <main className="app">
         <header className="topbar">
-          <div className="brand">Blackcrab</div>
+          <div className="brand">
+            <img className="brand-logo" src={blackcrabLogo} alt="" aria-hidden="true" />
+            <span>Blackcrab</span>
+          </div>
           <div className="controls">
             <label className="field">
               <span>cwd</span>
