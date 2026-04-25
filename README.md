@@ -1,7 +1,117 @@
-# Tauri + React + Typescript
+# Blackcrab
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Blackcrab is a local desktop GUI for Claude Code sessions. It wraps your local
+`claude` CLI, indexes saved conversations from `~/.claude/projects`, and gives
+you a faster interface for resuming, searching, exporting, and running multiple
+sessions side by side.
 
-## Recommended IDE Setup
+This project is early, macOS-first, and intended for people already comfortable
+with Claude Code, Tauri, and local developer tools.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+![Blackcrab logo](blackcrab_logo.png)
+
+## Features
+
+- Resume and search local Claude Code sessions.
+- Run a single conversation or a grid of up to six live panels.
+- Rename, delete, and export sessions as Markdown.
+- View tool calls, diffs, command output, thinking blocks, and permission
+  prompts in a structured transcript.
+- Open local preview URLs in a side webview.
+- Use an integrated terminal backed by a native PTY.
+- Attach dropped files to messages.
+- Track context and output-token usage per session.
+
+## Requirements
+
+- macOS for the currently tested desktop experience.
+- Node.js 20 or newer.
+- Rust stable and Cargo.
+- The Claude Code CLI installed and authenticated.
+- Tauri 2 system dependencies for your target platform.
+
+Install and authenticate Claude Code first:
+
+```sh
+npm install -g @anthropic-ai/claude-code
+claude auth login --claudeai
+```
+
+API-billing users can use the Claude Code console login flow instead.
+
+## Development
+
+```sh
+npm ci
+npm run typecheck
+cargo check --manifest-path src-tauri/Cargo.toml --locked
+npm run tauri -- dev
+```
+
+Other useful commands:
+
+```sh
+npm run build
+npm run check
+npm run tauri -- build
+```
+
+`npm run dev` starts only the Vite frontend. Use `npm run tauri -- dev` for the
+desktop app.
+
+## How It Works
+
+The frontend is React and Vite. The desktop shell and native commands are Tauri
+2 with a Rust backend.
+
+Blackcrab starts `claude -p` subprocesses with stream-json input/output. Each
+live panel owns one subprocess, and the Rust backend enforces one active writer
+per Claude session file so two panels do not append to the same JSONL at once.
+
+Saved sessions are discovered from Claude Code's local JSONL files under
+`~/.claude/projects`. Blackcrab reads those files to build the sidebar, search
+history, render transcript tails quickly, and export conversations.
+
+## Repository Map
+
+- `src/App.tsx`: main application state, transcript UI, sidebar, command
+  palette, grid mode, preview panel, and top-level Claude event handling.
+- `src/LivePanel.tsx`: self-contained grid panel with its own subprocess,
+  composer, transcript, and permission state.
+- `src/Terminal.tsx`: xterm.js wrapper for the Rust PTY backend.
+- `src/markdown.ts`: Markdown rendering, syntax highlighting, and PR
+  linkification.
+- `src-tauri/src/lib.rs`: Tauri commands for Claude process management,
+  session indexing/search, git helpers, native preview navigation, and PTY I/O.
+- `ROADMAP.md`: current stability and feature priorities.
+
+## Privacy
+
+Blackcrab is a local app. It does not proxy Claude traffic, ask for Anthropic
+credentials, or run its own hosted backend.
+
+It does read local Claude Code session files and pass messages to your local
+`claude` CLI. Network requests to Anthropic, MCP servers, websites, package
+registries, or other services come from the Claude CLI, tools it runs, opened
+URLs, or commands you execute locally.
+
+See `PRIVACY.md` for more detail.
+
+## Security
+
+Blackcrab intentionally coordinates powerful local tools: shells, Claude Code,
+file paths, webviews, and git commands. Treat it like a developer tool with
+local machine access, not a sandbox.
+
+Please report vulnerabilities privately. See `SECURITY.md`.
+
+## Contributing
+
+Issues and pull requests are welcome, especially for stability, packaging,
+documentation, tests, and focused UX improvements. Start with
+`CONTRIBUTING.md`, and open an issue before large behavior or architecture
+changes.
+
+## License
+
+Apache-2.0. See `LICENSE`.
