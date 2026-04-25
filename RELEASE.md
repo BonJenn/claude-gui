@@ -85,7 +85,50 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY -R BonJenn/blackcrab < ~/.tauri/blackcra
 Unsigned macOS builds work for testing, but public browser downloads should be
 signed and notarized to avoid Gatekeeper warnings.
 
-For signed and notarized macOS releases, add these GitHub Actions secrets:
+The release workflow requires Apple signing and notarization secrets on the
+macOS runner. The local machine currently has this Developer ID identity:
+
+```text
+Developer ID Application: Jonathan Benn (YF28W3NGG6)
+```
+
+Use a paid Apple Developer Program account. Free Apple Developer accounts can
+sign development builds, but cannot notarize public Developer ID downloads.
+
+### Export the Developer ID Certificate
+
+1. Open Keychain Access.
+2. Select the `login` keychain and `My Certificates`.
+3. Find `Developer ID Application: Jonathan Benn (YF28W3NGG6)`.
+4. Expand it, right-click the private key entry, and export it as a `.p12`.
+5. Use a strong export password and keep the `.p12` out of the repo.
+
+### Configure GitHub Secrets
+
+Use the helper script so secrets go directly to GitHub instead of through chat.
+
+With Apple ID notarization:
+
+```sh
+APPLE_CERTIFICATE_P12=~/Desktop/blackcrab-developer-id.p12 \
+  APPLE_ID=you@example.com \
+  ./scripts/configure-macos-signing-secrets.sh
+```
+
+The script prompts for the `.p12` export password and your Apple
+app-specific password.
+
+With App Store Connect API-key notarization:
+
+```sh
+APPLE_CERTIFICATE_P12=~/Desktop/blackcrab-developer-id.p12 \
+  APPLE_API_KEY=KEYID12345 \
+  APPLE_API_ISSUER=00000000-0000-0000-0000-000000000000 \
+  APPLE_API_KEY_P8_PATH=~/Downloads/AuthKey_KEYID12345.p8 \
+  ./scripts/configure-macos-signing-secrets.sh
+```
+
+The workflow supports these GitHub Actions secrets:
 
 - `APPLE_CERTIFICATE`: base64-encoded `.p12` Developer ID Application
   certificate.
@@ -95,9 +138,19 @@ For signed and notarized macOS releases, add these GitHub Actions secrets:
 - `APPLE_ID`: Apple Developer account email.
 - `APPLE_PASSWORD`: app-specific password for notarization.
 - `APPLE_TEAM_ID`: Apple Developer Team ID.
+- `APPLE_API_KEY`: App Store Connect API key ID.
+- `APPLE_API_ISSUER`: App Store Connect issuer ID.
+- `APPLE_API_KEY_P8`: contents of the downloaded `AuthKey_*.p8` file.
 
-The release workflow passes those secrets to Tauri automatically. If they are
-missing, the macOS build is not notarized.
+The release workflow passes those secrets to Tauri automatically. On macOS, the
+workflow now fails if the certificate or notarization credentials are missing.
+
+After downloading a draft macOS release, verify it locally:
+
+```sh
+spctl -a -vv -t open Blackcrab_0.1.0_aarch64.dmg
+xcrun stapler validate Blackcrab_0.1.0_aarch64.dmg
+```
 
 ## Tauri Auto-Update
 
