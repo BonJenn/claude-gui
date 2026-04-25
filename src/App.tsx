@@ -531,6 +531,23 @@ function useEvent<A extends unknown[], R>(
   return useCallback((...args: A) => ref.current(...args), []);
 }
 
+// Promise-flavored requestIdleCallback. Falls back to a setTimeout
+// macrotask in environments without native ric (older WebKit). Used to
+// yield to the browser between background work units so user input
+// doesn't queue up behind them.
+function ric(timeout = 500): Promise<void> {
+  return new Promise((resolve) => {
+    const w = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    };
+    if (typeof w.requestIdleCallback === "function") {
+      w.requestIdleCallback(() => resolve(), { timeout });
+    } else {
+      setTimeout(resolve, 1);
+    }
+  });
+}
+
 function App() {
   const [cwd, setCwd] = useState<string>("");
   const [model, setModel] = useState<string>("");
@@ -1465,8 +1482,12 @@ function App() {
   useEffect(() => {
     if (sessions.length === 0) return;
     let cancelled = false;
-    const queue = sessions.slice();
-    const concurrency = 2;
+    // Only prewarm the most-recently-used sessions. The user has 200+
+    // sessions in the sidebar and rarely clicks past the first 40 — so
+    // burning markdown-compile cycles on the long tail just slows the
+    // ones they actually use. sessions is already sorted by mtime desc
+    // by the Rust side.
+    const queue = sessions.slice(0, 30);
 
     const prewarmOne = async (s: SessionInfo) => {
       if (cancelled) return;
@@ -1482,6 +1503,11 @@ function App() {
           getGithubRepo(s.cwd),
         ]);
         if (cancelled) return;
+        // buildHistory + markdown compile is the expensive part — yield
+        // to the browser before it so click handlers don't block behind
+        // a prewarm batch. ric() resolves when the main thread is idle.
+        await ric();
+        if (cancelled) return;
         const { entries, toolUseMap } = buildHistory(events, repo);
         sessionCacheRef.current.set(s.id, {
           entries,
@@ -1493,17 +1519,16 @@ function App() {
       }
     };
 
-    const idx = { i: 0 };
-    const worker = async () => {
-      while (!cancelled) {
-        const i = idx.i++;
-        if (i >= queue.length) return;
+    // Single worker (was concurrency=2). One in-flight prewarm + idle
+    // gating keeps total background CPU low while the user is clicking
+    // around. The prior 2-worker version produced ~500ms of synchronous
+    // markdown work every ~500ms, blocking input handlers in between.
+    (async () => {
+      for (let i = 0; i < queue.length; i++) {
+        if (cancelled) return;
         await prewarmOne(queue[i]);
       }
-    };
-    const workers: Promise<void>[] = [];
-    for (let w = 0; w < concurrency; w++) workers.push(worker());
-    Promise.all(workers).catch(() => {});
+    })();
 
     return () => {
       cancelled = true;
@@ -2099,12 +2124,18 @@ function App() {
   async function resumeSession(sessionId: string, sessionCwd: string) {
     const token = ++resumeTokenRef.current;
     const isLatest = () => resumeTokenRef.current === token;
+    const t0 = performance.now();
+    const log = (label: string) => {
+      // Prefix lets us grep these in DevTools console without noise.
+      console.log(`[perf:resume] ${(performance.now() - t0).toFixed(1)}ms ${label}`);
+    };
 
     const info = sessions.find((s) => s.id === sessionId);
     const sessionModel = info?.model ?? "";
     const sessionPermissionMode = info?.permission_mode ?? "";
     const mtime = info?.mtime_ms ?? 0;
 
+    log(`enter sid=${sessionId.slice(0, 8)}`);
     const cached = sessionCacheRef.current.get(sessionId);
     // Any cache with entries is good enough for instant display — the
     // prewarm loop keeps entries reasonably fresh on mtime change, and
@@ -2114,6 +2145,7 @@ function App() {
     // had no disk mtime) and caused "expand from grid" to always take
     // the slow path.
     const cacheHit = !!cached && cached.entries.length > 0;
+    log(`cache=${cacheHit ? "HIT" : "MISS"} entries=${cached?.entries.length ?? 0}`);
 
     // ---------- Single synchronous batch: swap entire view in one render ----------
     // Everything below runs before any await so React 18 batches them into a
@@ -2190,6 +2222,9 @@ function App() {
     // send_message, so we never dispatch into a non-existent subprocess.
     setSessionOn(true);
     setTimeout(() => inputRef.current?.focus(), 0);
+    log("synchronous-batch done; start fired");
+    requestAnimationFrame(() => log("first paint after click"));
+    startPromise.then(() => log("subprocess ready"));
     startPromise
       .catch((e) => {
         if (!isLatest()) return;
@@ -2219,8 +2254,10 @@ function App() {
           }),
           getGithubRepo(useCwd),
         ]);
+        log(`load_session_tail returned events=${events.length}`);
         if (!isLatest()) return;
         const { entries: history, toolUseMap } = buildHistory(events, repo);
+        log(`buildHistory done entries=${history.length}`);
         sessionCacheRef.current.set(sessionId, {
           entries: history,
           toolUseMap,
@@ -5910,8 +5947,15 @@ function PermissionPromptOverlay({
 // Initial window of entries to render in a PlainTranscript — anything
 // beyond this is hidden behind a "show older" button so first paint
 // stays fast regardless of conversation length.
-const TRANSCRIPT_WINDOW = 40;
-const TRANSCRIPT_WINDOW_STEP = 40;
+// How many entries to materialize on the initial mount of a new
+// transcript. Each EntryView can be very heavy (markdown + a code
+// block of ~100 lines emits ~500 syntax-highlighted spans), and on
+// first commit the browser paints everything regardless of
+// content-visibility — so 40 rows can mean thousands of paint
+// regions and a 3-second frame. 12 covers a typical viewport with
+// a small buffer; older rows load via the "show older" button below.
+const TRANSCRIPT_WINDOW = 12;
+const TRANSCRIPT_WINDOW_STEP = 20;
 
 const PlainTranscript = memo(function PlainTranscript({
   entries,

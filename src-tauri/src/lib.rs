@@ -1279,10 +1279,40 @@ fn load_session_tail(
     if !path.exists() {
         return Err("session file not found".to_string());
     }
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+
+    // Session JSONL files grow to 10-50MB for long conversations.
+    // Reading the whole file just to take the last ~200 lines added
+    // seconds of latency to every cache-miss resume. Instead, seek to
+    // the last TAIL_BYTES of the file, skip any partial first line, and
+    // parse only what we actually need. Average turn is well under
+    // 32KB, so 4MB comfortably covers the last 200 of them.
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let size = file
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .len();
+    let start_offset = size.saturating_sub(TAIL_BYTES);
+    if start_offset > 0 {
+        file.seek(SeekFrom::Start(start_offset))
+            .map_err(|e| e.to_string())?;
+    }
+    let read_cap = (size - start_offset) as usize + 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(read_cap);
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let content = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = content.lines().collect();
+    // If we didn't start at the beginning of the file, the first line
+    // in our buffer is almost certainly a partial — throw it away.
+    if start_offset > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+
     let cap = limit.max(1);
     let mut rev: Vec<serde_json::Value> = Vec::with_capacity(cap);
-    for line in content.lines().rev() {
+    for line in lines.iter().rev() {
         if rev.len() >= cap {
             break;
         }

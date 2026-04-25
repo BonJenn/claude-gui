@@ -1780,9 +1780,14 @@ body[data-resizing="true"] .terminal-resizer::after {
   padding-bottom: 14px;
   /* Skip layout + paint of rows that aren't near the viewport. For long
      transcripts this is the difference between a 2.5s reconcile and a
-     ~100ms one — the browser only materializes what the user can see. */
+     ~100ms one — the browser only materializes what the user can see.
+     `contain` reinforces the boundary so a code block's ~500 syntax
+     spans can't pull the parent layout into recalc, and the auto-mode
+     intrinsic size lets each row settle to its real size after first
+     visibility instead of staying clamped to the placeholder. */
+  contain: content;
   content-visibility: auto;
-  contain-intrinsic-size: 0 240px;
+  contain-intrinsic-size: auto 240px;
 }
 
 .transcript-load-older {
