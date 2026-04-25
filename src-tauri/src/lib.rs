@@ -49,6 +49,144 @@ struct SessionInfo {
     permission_mode: String,
 }
 
+#[derive(serde::Serialize)]
+struct ClaudePreflight {
+    installed: bool,
+    authenticated: bool,
+    version: String,
+    path: String,
+    auth_method: String,
+    api_provider: String,
+    error: String,
+}
+
+fn claude_path_env() -> String {
+    // Make sure spawned claude can be found even when the launching
+    // environment has a minimal PATH. Cover the common install locations.
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    paths.push(PathBuf::from("/usr/local/bin"));
+    paths.push(PathBuf::from("/opt/homebrew/bin"));
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+        let home = PathBuf::from(home);
+        paths.push(home.join(".npm-global/bin"));
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".volta/bin"));
+        paths.push(home.join(".bun/bin"));
+        paths.push(home.join(".cargo/bin"));
+    }
+    std::env::join_paths(paths)
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn find_executable_in_path(name: &str, path_env: &str) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_env) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{}.exe", name));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn claude_preflight() -> ClaudePreflight {
+    use std::process::Command as StdCommand;
+    let path_env = claude_path_env();
+    let cli_path = find_executable_in_path("claude", &path_env)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let version_output = StdCommand::new("claude")
+        .arg("--version")
+        .env("PATH", &path_env)
+        .output();
+    let Ok(version_output) = version_output else {
+        return ClaudePreflight {
+            installed: false,
+            authenticated: false,
+            version: String::new(),
+            path: cli_path,
+            auth_method: String::new(),
+            api_provider: String::new(),
+            error: "Claude Code CLI was not found on PATH".into(),
+        };
+    };
+    let version = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_string();
+
+    let auth_output = StdCommand::new("claude")
+        .args(["auth", "status", "--json"])
+        .env("PATH", &path_env)
+        .output();
+    let Ok(auth_output) = auth_output else {
+        return ClaudePreflight {
+            installed: true,
+            authenticated: false,
+            version,
+            path: cli_path,
+            auth_method: String::new(),
+            api_provider: String::new(),
+            error: "failed to run `claude auth status`".into(),
+        };
+    };
+    let stdout = String::from_utf8_lossy(&auth_output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&auth_output.stderr).to_string();
+    let parsed = serde_json::from_str::<serde_json::Value>(&stdout);
+    if let Ok(v) = parsed {
+        return ClaudePreflight {
+            installed: true,
+            authenticated: v
+                .get("loggedIn")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            version,
+            path: cli_path,
+            auth_method: v
+                .get("authMethod")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            api_provider: v
+                .get("apiProvider")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            error: String::new(),
+        };
+    }
+
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim().to_string()
+    } else {
+        stdout.trim().to_string()
+    };
+    ClaudePreflight {
+        installed: true,
+        authenticated: false,
+        version,
+        path: cli_path,
+        auth_method: String::new(),
+        api_provider: String::new(),
+        error: if detail.is_empty() {
+            "could not parse `claude auth status` output".into()
+        } else {
+            detail
+        },
+    }
+}
+
 fn context_limit_for(model: &str, max_observed: u64) -> u64 {
     // If the session ever exceeded the 200k envelope, it must be on 1M.
     if max_observed > 200_000 {
@@ -169,25 +307,7 @@ async fn start_session(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Make sure the spawned claude can be found even when the launching
-    // environment has a minimal PATH. Cover the common install locations.
-    let path = std::env::var("PATH").unwrap_or_default();
-    let mut extras: Vec<String> = Vec::new();
-    extras.push("/usr/local/bin".into());
-    extras.push("/opt/homebrew/bin".into());
-    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
-        extras.push(format!("{}/.npm-global/bin", home));
-        extras.push(format!("{}/.local/bin", home));
-        extras.push(format!("{}/.volta/bin", home));
-        extras.push(format!("{}/.bun/bin", home));
-        extras.push(format!("{}/.cargo/bin", home));
-    }
-    let combined = if path.is_empty() {
-        extras.join(":")
-    } else {
-        format!("{}:{}", path, extras.join(":"))
-    };
-    cmd.env("PATH", combined);
+    cmd.env("PATH", claude_path_env());
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn claude: {}", e))?;
     let stdin = child.stdin.take().ok_or_else(|| "no stdin handle".to_string())?;
@@ -1072,7 +1192,7 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
     if !projects.exists() {
         return Ok(vec![]);
     }
-    let mut out: Vec<SessionInfo> = vec![];
+    let mut by_id: HashMap<String, SessionInfo> = HashMap::new();
     let dirs = fs::read_dir(&projects).map_err(|e| e.to_string())?;
     for dir_entry in dirs.flatten() {
         let dir_path = dir_entry.path();
@@ -1089,10 +1209,17 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
                 continue;
             }
             if let Some(info) = summarize_session(&path) {
-                out.push(info);
+                let should_replace = by_id
+                    .get(&info.id)
+                    .map(|existing| info.mtime_ms > existing.mtime_ms)
+                    .unwrap_or(true);
+                if should_replace {
+                    by_id.insert(info.id.clone(), info);
+                }
             }
         }
     }
+    let mut out: Vec<SessionInfo> = by_id.into_iter().map(|(_, info)| info).collect();
     out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
     Ok(out)
 }
@@ -1345,6 +1472,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            claude_preflight,
             start_session,
             send_message,
             send_raw,

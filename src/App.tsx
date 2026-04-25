@@ -138,6 +138,16 @@ type BranchInfo = {
   dirty: boolean;
 };
 
+type ClaudePreflight = {
+  installed: boolean;
+  authenticated: boolean;
+  version: string;
+  path: string;
+  auth_method: string;
+  api_provider: string;
+  error: string;
+};
+
 export const REPLAY_SKIP = new Set([
   "queue-operation",
   "last-prompt",
@@ -707,6 +717,11 @@ function App() {
   // tells the user to re-auth and restart — the CLI only reloads its
   // auth file at startup.
   const [authErrorSeen, setAuthErrorSeen] = useState(false);
+  const [claudePreflight, setClaudePreflight] =
+    useState<ClaudePreflight | null>(null);
+  const [claudePreflightLoading, setClaudePreflightLoading] = useState(true);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  const [onboardingForced, setOnboardingForced] = useState(false);
   const [busy, setBusy] = useState(false);
   // When busy stays true for a long time with no new entries landing,
   // surface a banner so the user can interrupt / reset instead of
@@ -1269,6 +1284,38 @@ function App() {
   useEffect(() => {
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
   }, []);
+
+  const refreshClaudePreflight = useCallback(async () => {
+    setClaudePreflightLoading(true);
+    try {
+      const status = await invoke<ClaudePreflight>("claude_preflight");
+      setClaudePreflight(status);
+      if (status.installed && status.authenticated) {
+        setOnboardingDismissed(false);
+      }
+    } catch (e) {
+      setClaudePreflight({
+        installed: false,
+        authenticated: false,
+        version: "",
+        path: "",
+        auth_method: "",
+        api_provider: "",
+        error:
+          typeof e === "string"
+            ? e
+            : e instanceof Error
+              ? e.message
+              : String(e),
+      });
+    } finally {
+      setClaudePreflightLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshClaudePreflight();
+  }, [refreshClaudePreflight]);
 
   // Only flag "new content below" when the entry count grows while we
   // are NOT stuck to the bottom. Depending on stuckToBottom here would
@@ -2659,10 +2706,29 @@ function App() {
       ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
       : undefined
     : activeSessionId;
+  const shouldShowOnboarding =
+    onboardingForced ||
+    (!onboardingDismissed &&
+      ((claudePreflightLoading && !claudePreflight) ||
+        !!(
+          claudePreflight &&
+          (!claudePreflight.installed || !claudePreflight.authenticated)
+        )));
 
   return (
     <div className="root">
       <ToastHost />
+      {shouldShowOnboarding && (
+          <ClaudeOnboardingOverlay
+            status={claudePreflight}
+            loading={claudePreflightLoading}
+            onRecheck={refreshClaudePreflight}
+            onContinue={() => {
+              setOnboardingDismissed(true);
+              setOnboardingForced(false);
+            }}
+          />
+        )}
       {authErrorSeen && (
         <AuthErrorModal
           onDismiss={() => setAuthErrorSeen(false)}
@@ -2704,6 +2770,17 @@ function App() {
               run: () => {
                 setPaletteOpen(false);
                 void newSession();
+              },
+            },
+            {
+              id: "claude-setup",
+              title: "Claude Code setup",
+              hint: claudePreflight?.authenticated ? "ready" : "setup",
+              run: () => {
+                setPaletteOpen(false);
+                setOnboardingDismissed(false);
+                setOnboardingForced(true);
+                void refreshClaudePreflight();
               },
             },
             {
@@ -5804,6 +5881,132 @@ function WorktreePromptModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ClaudeOnboardingOverlay({
+  status,
+  loading,
+  onRecheck,
+  onContinue,
+}: {
+  status: ClaudePreflight | null;
+  loading: boolean;
+  onRecheck: () => void;
+  onContinue: () => void;
+}) {
+  const installCommand = "npm install -g @anthropic-ai/claude-code";
+  const loginCommand = "claude auth login --claudeai";
+  const isInstalled = !!status?.installed;
+  const isAuthenticated = !!status?.authenticated;
+  const title = loading
+    ? "Checking Claude Code"
+    : !isInstalled
+      ? "Install Claude Code"
+      : !isAuthenticated
+        ? "Sign in to Claude Code"
+        : "Claude Code is ready";
+  const copyCommand = (cmd: string) => {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(cmd).catch(() => {});
+  };
+
+  return (
+    <div className="auth-error-overlay onboarding-overlay" role="dialog" aria-modal="true">
+      <div className="auth-error-card onboarding-card">
+        <div className="onboarding-kicker">Blackcrab setup</div>
+        <h2>{title}</h2>
+        <p>
+          Blackcrab uses your local Claude Code install and account. It never
+          asks for, stores, or proxies Anthropic credentials.
+        </p>
+        <div className="onboarding-status-list">
+          <div className={`onboarding-status ${isInstalled ? "ok" : loading ? "" : "bad"}`}>
+            <span className="onboarding-status-dot" />
+            <div>
+              <strong>Claude Code CLI</strong>
+              <span>
+                {loading
+                  ? "checking..."
+                  : isInstalled
+                    ? `${status?.version || "installed"}${status?.path ? ` at ${status.path}` : ""}`
+                    : "not found on PATH"}
+              </span>
+            </div>
+          </div>
+          <div className={`onboarding-status ${isAuthenticated ? "ok" : loading ? "" : "bad"}`}>
+            <span className="onboarding-status-dot" />
+            <div>
+              <strong>Authentication</strong>
+              <span>
+                {loading
+                  ? "checking..."
+                  : isAuthenticated
+                    ? `${status?.auth_method || "signed in"}${status?.api_provider ? ` (${status.api_provider})` : ""}`
+                    : "not signed in"}
+              </span>
+            </div>
+          </div>
+        </div>
+        {!loading && !isInstalled && (
+          <>
+            <p>Install Claude Code, then sign in with Claude.ai Pro/Max or Anthropic Console billing.</p>
+            <CommandCopyRow command={installCommand} onCopy={copyCommand} />
+            <CommandCopyRow command={loginCommand} onCopy={copyCommand} />
+          </>
+        )}
+        {!loading && isInstalled && !isAuthenticated && (
+          <>
+            <p>Run the login command in a terminal, complete the browser flow, then recheck.</p>
+            <CommandCopyRow command={loginCommand} onCopy={copyCommand} />
+            <p className="onboarding-note">
+              API billing users can run <code>claude auth login --console</code> instead.
+            </p>
+          </>
+        )}
+        {!loading && status?.error && (
+          <pre className="onboarding-error">{status.error}</pre>
+        )}
+        <div className="auth-error-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onContinue}
+          >
+            Continue anyway
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onRecheck}
+            disabled={loading}
+          >
+            {loading ? "Checking..." : "Recheck"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommandCopyRow({
+  command,
+  onCopy,
+}: {
+  command: string;
+  onCopy: (cmd: string) => void;
+}) {
+  return (
+    <div className="onboarding-command">
+      <code>{command}</code>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        onClick={() => onCopy(command)}
+      >
+        Copy
+      </button>
     </div>
   );
 }
