@@ -227,6 +227,7 @@ export function LivePanel({
         const { entries: history, toolUseMap: loadedMap } = buildHistory(
           events,
           repo,
+          { precompileMarkdown: false },
         );
         for (const [k, v] of loadedMap) toolUseMap.set(k, v);
         setEntries(history);

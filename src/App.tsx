@@ -12,9 +12,6 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { compileMarkdown } from "./markdown";
 import {
   LivePanel,
@@ -25,12 +22,13 @@ import {
 import { subscribeToasts, type Toast, notifyErr } from "./toast";
 import "./App.css";
 
-// Hoisted so they're stable across renders — creating them fresh each time
-// would break react-markdown's internal caches and blow up re-render cost.
-const REMARK_PLUGINS = [remarkGfm];
-const REHYPE_PLUGINS = [rehypeHighlight];
-
-export type TextBlock = { type: "text"; text: string; _streaming?: boolean; _html?: string };
+export type TextBlock = {
+  type: "text";
+  text: string;
+  _streaming?: boolean;
+  _html?: string;
+  _repo?: string;
+};
 export type ToolUseBlock = {
   type: "tool_use";
   id: string;
@@ -49,6 +47,7 @@ export type ThinkingBlock = {
   thinking: string;
   _streaming?: boolean;
   _html?: string;
+  _repo?: string;
 };
 export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | { type: string; [k: string]: unknown };
 
@@ -400,12 +399,15 @@ async function getGithubRepo(cwd: string): Promise<string> {
 export function buildHistory(
   events: Array<Record<string, unknown>>,
   repo?: string,
+  opts: { precompileMarkdown?: boolean } = {},
 ): {
   entries: Entry[];
   toolUseMap: Map<string, ToolMeta>;
 } {
   const entries: Entry[] = [];
   const toolUseMap = new Map<string, ToolMeta>();
+  const precompileMarkdown = opts.precompileMarkdown !== false;
+  const markdownRepo = repo || undefined;
   // De-dup assistant entries: stored sessions can contain multiple rows with
   // the same message id (retries, continued turns). Keep the latest.
   const msgIdToIdx = new Map<string, number>();
@@ -420,11 +422,23 @@ export function buildHistory(
       const blocks = (msg?.content ?? []).map((b): Block => {
         if (b.type === "text") {
           const tb = b as TextBlock;
-          return { ...tb, _html: compileMarkdown(tb.text ?? "", repo) };
+          return {
+            ...tb,
+            _repo: markdownRepo,
+            _html: precompileMarkdown
+              ? compileMarkdown(tb.text ?? "", repo)
+              : undefined,
+          };
         }
         if (b.type === "thinking") {
           const thb = b as ThinkingBlock;
-          return { ...thb, _html: compileMarkdown(thb.thinking ?? "", repo) };
+          return {
+            ...thb,
+            _repo: markdownRepo,
+            _html: precompileMarkdown
+              ? compileMarkdown(thb.thinking ?? "", repo)
+              : undefined,
+          };
         }
         return b;
       });
@@ -1508,7 +1522,9 @@ function App() {
         // a prewarm batch. ric() resolves when the main thread is idle.
         await ric();
         if (cancelled) return;
-        const { entries, toolUseMap } = buildHistory(events, repo);
+        const { entries, toolUseMap } = buildHistory(events, repo, {
+          precompileMarkdown: false,
+        });
         sessionCacheRef.current.set(s.id, {
           entries,
           toolUseMap,
@@ -2202,29 +2218,45 @@ function App() {
 
     const useCwd = sessionCwd || cwd;
 
-    // Kick off the claude subprocess in the background. We do NOT block
-    // the visible switch on it — the click is "instant" because the
-    // cached transcript is already showing and the input is already
-    // focused (below). send/sendQuickReply await startPromiseRef before
-    // dispatching send_message so messages still go to the right pid.
-    // setPermissionMode above hasn't flushed yet, so send the session's
-    // own permission mode to start_session directly.
-    const startPromise = invoke("start_session", {
-      panelId: "main",
-      cwd: useCwd,
-      permissionMode: sessionPermissionMode || permissionMode,
-      model: sessionModel || model || null,
-      resumeId: sessionId,
-    });
+    // Start the claude subprocess in the background. On a cold cache,
+    // gate that start until after the transcript tail has loaded and
+    // rendered; CLI startup can take seconds, and it should never sit
+    // in front of showing already-saved conversation history. send()
+    // still awaits startPromiseRef before dispatching send_message.
+    let releaseStartGate: () => void = () => {};
+    const startGate = cacheHit
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          releaseStartGate = resolve;
+        });
+    const startPromise = (async () => {
+      await startGate;
+      if (!isLatest()) return;
+      // setPermissionMode above hasn't flushed yet, so send the
+      // session's own permission mode to start_session directly.
+      await invoke("start_session", {
+        panelId: "main",
+        cwd: useCwd,
+        permissionMode: sessionPermissionMode || permissionMode,
+        model: sessionModel || model || null,
+        resumeId: sessionId,
+      });
+    })();
     startPromiseRef.current = startPromise;
     // Optimistic flip — sessionOn becomes the "ready to chat" indicator
     // immediately. send() will still await the start promise before any
     // send_message, so we never dispatch into a non-existent subprocess.
     setSessionOn(true);
     setTimeout(() => inputRef.current?.focus(), 0);
-    log("synchronous-batch done; start fired");
+    log(
+      cacheHit
+        ? "synchronous-batch done; start fired"
+        : "synchronous-batch done; loading history before start",
+    );
     requestAnimationFrame(() => log("first paint after click"));
-    startPromise.then(() => log("subprocess ready"));
+    startPromise.then(() => {
+      if (isLatest()) log("subprocess ready");
+    });
     startPromise
       .catch((e) => {
         if (!isLatest()) return;
@@ -2256,7 +2288,9 @@ function App() {
         ]);
         log(`load_session_tail returned events=${events.length}`);
         if (!isLatest()) return;
-        const { entries: history, toolUseMap } = buildHistory(events, repo);
+        const { entries: history, toolUseMap } = buildHistory(events, repo, {
+          precompileMarkdown: false,
+        });
         log(`buildHistory done entries=${history.length}`);
         sessionCacheRef.current.set(sessionId, {
           entries: history,
@@ -2281,6 +2315,7 @@ function App() {
           ]);
         }
       } finally {
+        releaseStartGate();
         if (isLatest()) setResumingId(null);
       }
     }
@@ -3482,7 +3517,7 @@ function ToastHost() {
 // Caveat: if the transcript re-renders while the overlay is open
 // (e.g. a streaming turn arrives), the wrapping <mark>s are thrown out
 // and the user has to re-type to re-search. This keeps the code simple
-// and avoids fighting react-markdown's memoized output.
+// and avoids fighting the memoized transcript output.
 function SearchOverlay({
   scrollRef,
   onClose,
@@ -4586,32 +4621,32 @@ function handleMarkdownClick(e: React.MouseEvent<HTMLDivElement>) {
   }
 }
 
-const mdComponents = {
-  a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
-    const isExternal = !!href && /^https?:\/\//i.test(href);
-    return (
-      <a
-        href={href}
-        {...rest}
-        target={isExternal ? "_blank" : undefined}
-        rel={isExternal ? "noopener noreferrer" : undefined}
-        onClick={(e) => {
-          if (!href || !isExternal) return;
-          // Always prevent default so the app window never navigates.
-          e.preventDefault();
-          e.stopPropagation();
-          if (linkClickHandlerRef.current) {
-            linkClickHandlerRef.current(href);
-          } else {
-            openUrl(href).catch((err) => console.error("openUrl failed:", err));
-          }
-        }}
-      >
-        {children}
-      </a>
-    );
-  },
-};
+function CompiledMarkdown({
+  text,
+  html,
+  repo,
+  className,
+}: {
+  text: string;
+  html?: string;
+  repo?: string;
+  className: string;
+}) {
+  // Historical transcripts are cached as raw markdown so sidebar clicks
+  // don't synchronously compile up to 200 old messages. Only rows that
+  // PlainTranscript actually mounts pay this cost.
+  const rendered = useMemo(
+    () => html ?? compileMarkdown(text, repo),
+    [html, text, repo],
+  );
+  return (
+    <div
+      className={className}
+      dangerouslySetInnerHTML={{ __html: rendered }}
+      onClick={handleMarkdownClick}
+    />
+  );
+}
 
 function BlockView({ block }: { block: Block }) {
   // Streaming can leave sparse slots in the blocks array if the CLI
@@ -4626,26 +4661,13 @@ function BlockView({ block }: { block: Block }) {
     if (tb._streaming) {
       return <StreamingText text={text} />;
     }
-    // Precompiled HTML path — no React reconciliation inside the bubble.
-    if (tb._html) {
-      return (
-        <div
-          className="block text markdown"
-          dangerouslySetInnerHTML={{ __html: tb._html }}
-          onClick={handleMarkdownClick}
-        />
-      );
-    }
     return (
-      <div className="block text markdown">
-        <ReactMarkdown
-          remarkPlugins={REMARK_PLUGINS}
-          rehypePlugins={REHYPE_PLUGINS}
-          components={mdComponents}
-        >
-          {text}
-        </ReactMarkdown>
-      </div>
+      <CompiledMarkdown
+        className="block text markdown"
+        text={text}
+        html={tb._html}
+        repo={tb._repo}
+      />
     );
   }
 
@@ -4660,26 +4682,15 @@ function BlockView({ block }: { block: Block }) {
         </details>
       );
     }
-    if (tb._html) {
-      return (
-        <details className="block thinking" open>
-          <summary>thinking</summary>
-          <div
-            className="markdown"
-            dangerouslySetInnerHTML={{ __html: tb._html }}
-            onClick={handleMarkdownClick}
-          />
-        </details>
-      );
-    }
     return (
       <details className="block thinking" open>
         <summary>thinking</summary>
-        <div className="markdown">
-          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={mdComponents}>
-            {t}
-          </ReactMarkdown>
-        </div>
+        <CompiledMarkdown
+          className="markdown"
+          text={t}
+          html={tb._html}
+          repo={tb._repo}
+        />
       </details>
     );
   }
