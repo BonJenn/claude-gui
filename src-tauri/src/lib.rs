@@ -671,14 +671,29 @@ async fn stop_session(state: State<'_, AppState>, panel_id: String) -> Result<()
 
 #[tauri::command]
 async fn interrupt_session(state: State<'_, AppState>, panel_id: String) -> Result<(), String> {
-    let guard = state.sessions.lock().await;
-    if let Some(s) = guard.get(&panel_id) {
-        if let Some(pid) = s.child.id() {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGINT);
+    #[cfg(unix)]
+    {
+        let guard = state.sessions.lock().await;
+        if let Some(s) = guard.get(&panel_id) {
+            if let Some(pid) = s.child.id() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGINT);
+                }
             }
         }
     }
+
+    #[cfg(windows)]
+    {
+        let mut guard = state.sessions.lock().await;
+        if let Some(s) = guard.get_mut(&panel_id) {
+            s.stdin
+                .write_all(&[0x03])
+                .await
+                .map_err(|e| format!("failed to write interrupt to session: {}", e))?;
+        }
+    }
+
     Ok(())
 }
 
