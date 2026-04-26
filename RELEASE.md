@@ -143,7 +143,9 @@ The workflow supports these GitHub Actions secrets:
 - `APPLE_API_KEY_P8`: contents of the downloaded `AuthKey_*.p8` file.
 
 The release workflow passes those secrets to Tauri automatically. On macOS, the
-workflow now fails if the certificate or notarization credentials are missing.
+workflow fails if the certificate or notarization credentials are missing. Tauri
+notarizes and staples the `.app`; the workflow then notarizes, staples, verifies,
+and re-uploads the `.dmg` so the website download is accepted by Gatekeeper too.
 
 After downloading a draft macOS release, verify it locally:
 
