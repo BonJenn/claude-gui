@@ -5,6 +5,12 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
+export type TerminalInitialWrite = {
+  id?: string;
+  data: string;
+  delayMs?: number;
+};
+
 // A live PTY-backed terminal panel. Spawns the user's shell in `cwd`
 // on mount and kills it on unmount. Bidirectional byte streaming runs
 // through Rust: we emit `terminal_write` on keystrokes and receive
@@ -13,10 +19,14 @@ export function TerminalPanel({
   terminalId,
   cwd,
   visible,
+  initialWrites,
+  onInitialWrite,
 }: {
   terminalId: string;
   cwd: string;
   visible: boolean;
+  initialWrites?: TerminalInitialWrite[];
+  onInitialWrite?: (write: TerminalInitialWrite) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -51,15 +61,33 @@ export function TerminalPanel({
     fit.fit();
     const cols = term.cols;
     const rows = term.rows;
+    let disposed = false;
+    const timers: number[] = [];
 
     invoke("terminal_spawn", {
       terminalId,
       cwd,
       cols,
       rows,
-    }).catch((e) => {
-      term.writeln(`\x1b[31mfailed to start terminal: ${e}\x1b[0m`);
-    });
+    })
+      .then(() => {
+        if (disposed) return;
+        for (const write of initialWrites ?? []) {
+          const timer = window.setTimeout(() => {
+            if (disposed) return;
+            invoke("terminal_write", {
+              terminalId,
+              data: write.data,
+            })
+              .then(() => onInitialWrite?.(write))
+              .catch(() => {});
+          }, Math.max(0, write.delayMs ?? 0));
+          timers.push(timer);
+        }
+      })
+      .catch((e) => {
+        term.writeln(`\x1b[31mfailed to start terminal: ${e}\x1b[0m`);
+      });
 
     const writeSub = term.onData((data) => {
       invoke("terminal_write", { terminalId, data }).catch(() => {});
@@ -98,6 +126,8 @@ export function TerminalPanel({
     ro.observe(el);
 
     return () => {
+      disposed = true;
+      for (const timer of timers) window.clearTimeout(timer);
       writeSub.dispose();
       resizeSub.dispose();
       if (unlistenOutput) unlistenOutput();

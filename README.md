@@ -19,6 +19,7 @@ with Claude Code, Tauri, and local developer tools.
   prompts in a structured transcript.
 - Open local preview URLs in a side webview.
 - Use an integrated terminal backed by a native PTY.
+- Launch an interactive Claude Code computer-use session from Blackcrab.
 - Attach dropped files to messages.
 - Track context and output-token usage per session.
 
@@ -45,19 +46,23 @@ API-billing users can use the Claude Code console login flow instead.
 npm ci
 npm run typecheck
 cargo check --manifest-path src-tauri/Cargo.toml --locked
-npm run tauri -- dev
+npm run dev
 ```
 
 Other useful commands:
 
 ```sh
+npm run dev:web
 npm run build
 npm run check
+npm run dev:desktop
 npm run tauri -- build
 ```
 
-`npm run dev` starts only the Vite frontend. Use `npm run tauri -- dev` for the
-desktop app.
+`npm run dev` starts the Tauri desktop app. `npm run dev:web` starts only the
+Vite frontend in a browser, primarily for browser-only UI debugging. The dev
+desktop script picks an open port between 1420 and 1520 and passes it to both
+Tauri and Vite.
 
 ## Downloads and Updates
 
@@ -84,6 +89,16 @@ The frontend is React and Vite. The desktop shell and native commands are Tauri
 Blackcrab starts `claude -p` subprocesses with stream-json input/output. Each
 live panel owns one subprocess, and the Rust backend enforces one active writer
 per Claude session file so two panels do not append to the same JSONL at once.
+
+Claude Code computer use currently requires an interactive Claude Code session,
+so Blackcrab launches it through the PTY terminal instead of the structured
+`claude -p` transcript path. Use the Computer Use button or command palette
+entry, then use the terminal banner's `open /mcp` action to enable the built-in
+`computer-use` MCP server if needed. The composer `GUI` action runs a hidden
+interactive computer-use sidecar and streams it back into the main chat, with
+inline controls for `/mcp`, menu navigation, and replies. Browser/search
+handoffs tell Claude to prefer WebSearch or Claude-in-Chrome because Safari is
+read-only for computer-use mouse and keyboard control.
 
 Saved sessions are discovered from Claude Code's local JSONL files under
 `~/.claude/projects`. Blackcrab reads those files to build the sidebar, search

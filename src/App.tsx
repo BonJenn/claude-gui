@@ -18,7 +18,9 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { TerminalPanel } from "./Terminal";
+import { TerminalPanel, type TerminalInitialWrite } from "./Terminal";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -78,7 +80,16 @@ export type Entry =
       isError?: boolean;
     }
   | { kind: "system"; id: string; text: string }
-  | { kind: "result"; id: string; text: string; isError?: boolean };
+  | { kind: "result"; id: string; text: string; isError?: boolean }
+  | {
+      kind: "computer_use";
+      id: string;
+      terminalId: string;
+      title: string;
+      output: string;
+      status: "starting" | "running" | "done" | "error";
+      error?: string;
+    };
 
 export type StreamEvent =
   | {
@@ -174,6 +185,16 @@ type AppSettings = {
   autoCheckUpdates: boolean;
   autoOpenPreview: boolean;
   newPanelWorktreeMode: NewPanelWorktreeMode;
+};
+
+type TerminalTab = {
+  id: string;
+  label: string;
+  kind?: "shell" | "computer-use";
+  initialWrites?: TerminalInitialWrite[];
+  handoffText?: string;
+  handoffAutoQueued?: boolean;
+  handoffSent?: boolean;
 };
 
 const APP_SETTINGS_STORAGE_KEY = "blackcrab.settings";
@@ -492,6 +513,11 @@ export function sessionEntriesToMarkdown(
           "",
         );
       }
+    } else if (e.kind === "computer_use") {
+      const text = stripAnsi(e.output).trim();
+      if (text) {
+        lines.push("## Computer Use", "", "```text", text, "```", "");
+      }
     }
     // Skip `system` and `result` marker lines — they're UI-only noise.
   }
@@ -517,6 +543,97 @@ export function looksLikeYesNoQuestion(text: string): boolean {
   const phrases =
     /\b(want me to|shall i|should i|do you want|would you like|make sense|sound good|sound right|sound okay|sound ok|that (ok|okay|good)|go ahead)\b/;
   return leads.test(stripped) || phrases.test(last);
+}
+
+function truncateForHandoff(text: string, max = 1600): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max - 32).trimEnd()}\n[truncated]`;
+}
+
+function stripAnsi(text: string): string {
+  return text
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
+    .replace(/\x1b[PX^_].*?\x1b\\/g, "")
+    .replace(/\x1b[@-_]/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+function needsComputerUseEnablement(output: string): boolean {
+  const text = stripAnsi(output).toLowerCase();
+  return (
+    text.includes("computer-use") &&
+    (text.includes("not enabled") ||
+      text.includes("enable the built-in computer-use") ||
+      text.includes("don't see computer-use") ||
+      text.includes("do not see computer-use") ||
+      text.includes("no computer-use") ||
+      text.includes("run /mcp"))
+  );
+}
+
+function buildAttachmentBody(
+  text: string,
+  attachments: Array<{ id: string; path: string }>,
+): string {
+  const attachList = attachments.map((a) => `- ${a.path}`).join("\n");
+  return attachments.length > 0
+    ? `${text || "(see attached files)"}\n\n[Attached files]\n${attachList}`
+    : text;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function assistantTextForHandoff(blocks: Block[]): string {
+  return blocks
+    .filter((b): b is TextBlock => b.type === "text")
+    .map((b) => b.text ?? "")
+    .filter((text) => text.trim())
+    .join("\n\n");
+}
+
+function buildComputerUseHandoffText(
+  entries: Entry[],
+  opts: {
+    cwd: string;
+    sessionId?: string;
+    model?: string;
+    composerText?: string;
+  },
+): string {
+  const recent = entries
+    .filter((e) => e.kind === "user" || e.kind === "assistant")
+    .slice(-6);
+  const lines: string[] = [
+    "Continue this task from Blackcrab in interactive Claude Code.",
+    "Use computer use only when the task needs direct GUI interaction, such as native apps, simulators, system dialogs, or tools without a CLI/API.",
+    "For browser/search tasks, use WebSearch or the Claude-in-Chrome integration; Safari is read-only for computer use and should not be driven with mouse/keyboard.",
+    "If computer-use is not enabled yet, ask me to run /mcp and enable the built-in computer-use server before proceeding.",
+    "",
+    `Project: ${opts.cwd || "(unknown)"}`,
+  ];
+  if (opts.sessionId) lines.push(`Blackcrab session: ${opts.sessionId}`);
+  if (opts.model) lines.push(`Model shown in Blackcrab: ${opts.model}`);
+  if (opts.composerText?.trim()) {
+    lines.push("", "Current composer draft:", truncateForHandoff(opts.composerText));
+  }
+  if (recent.length) {
+    lines.push("", "Recent Blackcrab context:");
+    for (const entry of recent) {
+      if (entry.kind === "user") {
+        lines.push(`User: ${truncateForHandoff(entry.text, 900)}`);
+      } else {
+        const text = assistantTextForHandoff(entry.blocks);
+        if (text.trim()) {
+          lines.push(`Claude: ${truncateForHandoff(text, 900)}`);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
 }
 
 // Heuristic: match the couple of ways the claude CLI surfaces a bad
@@ -777,9 +894,9 @@ function App() {
   }, [terminalOpen]);
   // Per-terminal-tab state. Each entry's id becomes its PTY id; tabs
   // are unmounted when closed, killing their shells.
-  const [terminalTabs, setTerminalTabs] = useState<
-    { id: string; label: string }[]
-  >(() => [{ id: `term-${randomId()}`, label: "1" }]);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(() => [
+    { id: `term-${randomId()}`, label: "1", kind: "shell" },
+  ]);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(
     () => `term-${randomId()}`,
   );
@@ -958,6 +1075,240 @@ function App() {
     },
     [],
   );
+  const updateEntryInTranscript = useCallback(
+    (
+      transcriptId: string,
+      entryId: string,
+      updater: (entry: Entry) => Entry,
+    ) => {
+      setAllTranscripts((prev) => {
+        const current = prev.get(transcriptId);
+        if (!current) return prev;
+        let changed = false;
+        const nextEntries = current.map((entry) => {
+          if (entry.id !== entryId) return entry;
+          changed = true;
+          return updater(entry);
+        });
+        if (!changed) return prev;
+        const next = new Map(prev);
+        next.set(transcriptId, nextEntries);
+        return next;
+      });
+    },
+    [],
+  );
+  const computerUseWorkersRef = useRef<
+    Map<string, { entryId: string; transcriptId: string }>
+  >(new Map());
+  const activeTerminalTab = useMemo(
+    () => terminalTabs.find((t) => t.id === activeTerminalId) ?? null,
+    [terminalTabs, activeTerminalId],
+  );
+  const openComputerUseSession = useEvent(
+    (opts: { handoff?: boolean } = {}) => {
+      const handoffText = opts.handoff
+        ? buildComputerUseHandoffText(entries, {
+            cwd,
+            sessionId: activeSessionId,
+            model: sessionMeta?.model || model,
+            composerText: input,
+          })
+        : undefined;
+
+      if (!handoffText) {
+        const existing = terminalTabs.find((t) => t.kind === "computer-use");
+        if (existing) {
+          setActiveTerminalId(existing.id);
+          setTerminalOpen(true);
+          setTerminalHeight((h) => Math.max(h, 360));
+          return;
+        }
+      }
+
+      const id = `term-cu-${randomId()}`;
+      const tab: TerminalTab = {
+        id,
+        label: handoffText ? "computer-handoff" : "computer-use",
+        kind: "computer-use",
+        initialWrites: [
+          { id: "start-claude", data: "claude\r", delayMs: 250 },
+          ...(handoffText
+            ? [
+                {
+                  id: "handoff",
+                  data: `${handoffText}\r`,
+                  delayMs: 2600,
+                },
+              ]
+            : []),
+        ],
+        handoffText,
+        handoffAutoQueued: !!handoffText,
+      };
+      setTerminalTabs((prev) => [...prev, tab]);
+      setActiveTerminalId(id);
+      setTerminalOpen(true);
+      setTerminalHeight((h) => Math.max(h, 360));
+    },
+  );
+  const sendComputerUseHandoff = useEvent((tab: TerminalTab) => {
+    if (!tab.handoffText) return;
+    invoke("terminal_write", {
+      terminalId: tab.id,
+      data: `${tab.handoffText}\r`,
+    })
+      .then(() => {
+        setTerminalTabs((prev) =>
+          prev.map((t) =>
+            t.id === tab.id ? { ...t, handoffSent: true } : t,
+          ),
+        );
+      })
+      .catch(notifyErr("failed to send handoff"));
+  });
+  const openComputerUseMcpMenu = useEvent((tab: TerminalTab) => {
+    invoke("terminal_write", {
+      terminalId: tab.id,
+      data: "/mcp\r",
+    }).catch(notifyErr("failed to open MCP menu"));
+  });
+  const onTerminalInitialWrite = useEvent(
+    (tabId: string, write: TerminalInitialWrite) => {
+      if (write.id !== "handoff") return;
+      setTerminalTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, handoffSent: true } : t,
+        ),
+      );
+    },
+  );
+  const updateComputerUseEntry = useCallback(
+    (
+      terminalId: string,
+      updater: (
+        entry: Extract<Entry, { kind: "computer_use" }>,
+      ) => Extract<Entry, { kind: "computer_use" }>,
+    ) => {
+      const worker = computerUseWorkersRef.current.get(terminalId);
+      if (!worker) return;
+      updateEntryInTranscript(worker.transcriptId, worker.entryId, (entry) =>
+        entry.kind === "computer_use" ? updater(entry) : entry,
+      );
+    },
+    [updateEntryInTranscript],
+  );
+  useEffect(() => {
+    computerUseControlsRef.current = {
+      send: (terminalId, data) => {
+        invoke("terminal_write", { terminalId, data }).catch(
+          notifyErr("computer-use input failed"),
+        );
+      },
+      stop: (terminalId) => {
+        invoke("terminal_kill", { terminalId }).catch(() => {});
+        updateComputerUseEntry(terminalId, (entry) => ({
+          ...entry,
+          status: "done",
+        }));
+      },
+    };
+    return () => {
+      computerUseControlsRef.current = null;
+    };
+  }, [updateComputerUseEntry]);
+  useEffect(() => {
+    const pending: Promise<() => void>[] = [
+      listen<{ terminal_id: string; data: string }>("terminal-output", (e) => {
+        const terminalId = e.payload?.terminal_id;
+        if (!terminalId?.startsWith("cu-inline-")) return;
+        const data = e.payload?.data ?? "";
+        updateComputerUseEntry(terminalId, (entry) => {
+          const output = `${entry.output}${data}`;
+          return {
+            ...entry,
+            status: entry.status === "starting" ? "running" : entry.status,
+            output:
+              output.length > 120_000
+                ? output.slice(output.length - 120_000)
+                : output,
+          };
+        });
+      }),
+      listen<{ terminal_id: string }>("terminal-exit", (e) => {
+        const terminalId = e.payload?.terminal_id;
+        if (!terminalId?.startsWith("cu-inline-")) return;
+        updateComputerUseEntry(terminalId, (entry) => ({
+          ...entry,
+          status: entry.status === "error" ? entry.status : "done",
+        }));
+        computerUseWorkersRef.current.delete(terminalId);
+      }),
+    ];
+    return () => {
+      for (const p of pending) {
+        p.then((u) => u()).catch(() => {});
+      }
+    };
+  }, [updateComputerUseEntry]);
+  const startInlineComputerUse = useEvent(async () => {
+    const text = input.trim();
+    if (!text && attachments.length === 0) return;
+    const body = buildAttachmentBody(text, attachments);
+    const handoffText = buildComputerUseHandoffText(entries, {
+      cwd,
+      sessionId: activeSessionId,
+      model: sessionMeta?.model || model,
+      composerText: body,
+    });
+    const terminalId = `cu-inline-${randomId()}`;
+    const entryId = `cu-entry-${randomId()}`;
+    const transcriptId = activeSessionIdRef.current ?? NEW_SESSION_KEY;
+    computerUseWorkersRef.current.set(terminalId, { entryId, transcriptId });
+
+    setInput("");
+    setAttachments([]);
+    setMentionQuery(null);
+    lastUserMessageRef.current = body;
+    setEntries((es) => [
+      ...es,
+      { kind: "user", id: randomId(), text: body },
+      {
+        kind: "computer_use",
+        id: entryId,
+        terminalId,
+        title: "Computer use",
+        output: "",
+        status: "starting",
+      },
+    ]);
+    setStuckToBottom(true);
+    setHasNewBelow(false);
+
+    try {
+      await invoke("terminal_spawn", {
+        terminalId,
+        cwd,
+        cols: 120,
+        rows: 40,
+      });
+      updateComputerUseEntry(terminalId, (entry) => ({
+        ...entry,
+        status: "running",
+      }));
+      await invoke("terminal_write", {
+        terminalId,
+        data: `claude ${shellQuote(handoffText)}\r`,
+      });
+    } catch (e) {
+      updateComputerUseEntry(terminalId, (entry) => ({
+        ...entry,
+        status: "error",
+        error: String(e),
+      }));
+      notifyErr("computer-use failed")(e);
+    }
+  });
   const [projectFilter, setProjectFilter] = useState<string>("");
   const [sessionSearch, setSessionSearch] = useState<string>("");
   const [groupByProject, setGroupByProject] = useState<boolean>(() => {
@@ -2815,13 +3166,7 @@ function App() {
 
     // Attachments become a trailing section of the message so claude's
     // Read / Bash / Glob tools can pick them up by path.
-    const attachList = attachments
-      .map((a) => `- ${a.path}`)
-      .join("\n");
-    const body =
-      attachments.length > 0
-        ? `${text || "(see attached files)"}\n\n[Attached files]\n${attachList}`
-        : text;
+    const body = buildAttachmentBody(text, attachments);
 
     setInput("");
     setAttachments([]);
@@ -3170,6 +3515,24 @@ function App() {
               hint: "⌘J",
               run: () => {
                 setTerminalOpen((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "computer-use",
+              title: "Open computer use session",
+              hint: "/mcp",
+              run: () => {
+                openComputerUseSession();
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "computer-use-handoff",
+              title: "Hand off current task to computer use",
+              hint: "GUI",
+              run: () => {
+                void startInlineComputerUse();
                 setPaletteOpen(false);
               },
             },
@@ -3772,13 +4135,23 @@ function App() {
                 interrupt
               </button>
             ) : (
-              <button
-                className="btn btn-send"
-                onClick={send}
-                disabled={!input.trim() && attachments.length === 0}
-              >
-                send
-              </button>
+              <>
+                <button
+                  className="btn btn-handoff"
+                  onClick={() => void startInlineComputerUse()}
+                  disabled={!input.trim() && attachments.length === 0}
+                  title="hand off this task to an interactive computer-use session"
+                >
+                  GUI
+                </button>
+                <button
+                  className="btn btn-send"
+                  onClick={send}
+                  disabled={!input.trim() && attachments.length === 0}
+                >
+                  send
+                </button>
+              </>
             )}
           </div>
           {dragOver && (
@@ -3879,6 +4252,43 @@ function App() {
                 ×
               </button>
             </div>
+            {activeTerminalTab?.kind === "computer-use" && (
+              <div className="computer-use-banner" role="status">
+                <div className="computer-use-banner-text">
+                  Interactive Claude Code session. Enable{" "}
+                  <code>computer-use</code> from <code>/mcp</code> if it is not
+                  already enabled, then approve macOS app access as needed.
+                </div>
+                <div className="computer-use-banner-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => openComputerUseMcpMenu(activeTerminalTab)}
+                    title="type /mcp into this interactive Claude Code session"
+                  >
+                    open /mcp
+                  </button>
+                  {activeTerminalTab.handoffText && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => sendComputerUseHandoff(activeTerminalTab)}
+                      disabled={
+                        activeTerminalTab.handoffSent ||
+                        activeTerminalTab.handoffAutoQueued
+                      }
+                      title="type the prepared Blackcrab handoff into this terminal"
+                    >
+                      {activeTerminalTab.handoffSent
+                        ? "handoff sent"
+                        : activeTerminalTab.handoffAutoQueued
+                        ? "handoff queued"
+                        : "type handoff"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="terminal-panel-slots">
               {terminalTabs.map((t) => (
                 <div
@@ -3891,6 +4301,10 @@ function App() {
                     terminalId={t.id}
                     cwd={cwd}
                     visible={t.id === activeTerminalId}
+                    initialWrites={t.initialWrites}
+                    onInitialWrite={(write) =>
+                      onTerminalInitialWrite(t.id, write)
+                    }
                   />
                 </div>
               ))}
@@ -5306,6 +5720,13 @@ const toolUseMapGlobal: { current: Map<string, ToolMeta> } = {
   })(),
 };
 
+const computerUseControlsRef: {
+  current: {
+    send: (terminalId: string, data: string) => void;
+    stop: (terminalId: string) => void;
+  } | null;
+} = { current: null };
+
 export function toolUseMapForPanel(
   panelId: string,
 ): Map<string, ToolMeta> | undefined {
@@ -5363,6 +5784,10 @@ export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
     );
   }
 
+  if (entry.kind === "computer_use") {
+    return <ComputerUseEntryView entry={entry} />;
+  }
+
   if (entry.kind === "system") {
     return <div className="sysline">{entry.text}</div>;
   }
@@ -5377,6 +5802,184 @@ export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
 
   return null;
 });
+
+function ComputerUseEntryView({
+  entry,
+}: {
+  entry: Extract<Entry, { kind: "computer_use" }>;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<XTerm | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const writtenRef = useRef(0);
+  const sendRef = useRef<(data: string) => void>(() => {});
+  const [draft, setDraft] = useState("");
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const term = new XTerm({
+      cursorBlink: false,
+      disableStdin: false,
+      fontFamily:
+        'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace',
+      fontSize: 12.5,
+      rows: 18,
+      scrollback: 2500,
+      convertEol: true,
+      theme: {
+        background: "#080808",
+        foreground: "#ededed",
+        cursor: "#e94545",
+      },
+      allowProposedApi: true,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(el);
+    termRef.current = term;
+    fitRef.current = fit;
+    const writeSub = term.onData((data) => sendRef.current(data));
+    try {
+      fit.fit();
+    } catch {}
+    const ro = new ResizeObserver(() => {
+      try {
+        fit.fit();
+      } catch {}
+    });
+    ro.observe(el);
+    return () => {
+      writeSub.dispose();
+      ro.disconnect();
+      term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
+      writtenRef.current = 0;
+    };
+  }, []);
+
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (entry.output.length < writtenRef.current) {
+      term.reset();
+      writtenRef.current = 0;
+    }
+    const next = entry.output.slice(writtenRef.current);
+    if (!next) return;
+    writtenRef.current = entry.output.length;
+    term.write(next, () => {
+      try {
+        term.scrollToBottom();
+      } catch {}
+    });
+  }, [entry.output]);
+
+  const canSend = entry.status !== "done" && entry.status !== "error";
+  const needsMcp = needsComputerUseEnablement(entry.output);
+  const send = (data: string) => {
+    if (!canSend) return;
+    computerUseControlsRef.current?.send(entry.terminalId, data);
+  };
+  sendRef.current = send;
+  const sendDraft = () => {
+    const text = draft.trim();
+    if (!text) return;
+    send(`${text}\r`);
+    setDraft("");
+  };
+
+  return (
+    <div className="msg msg-assistant msg-computer-use">
+      <div className="msg-role">computer use</div>
+      <div className="msg-body computer-use-inline">
+        <div className="computer-use-inline-head">
+          <span className={`computer-use-status ${entry.status}`}>
+            {entry.status}
+          </span>
+          <span className="computer-use-inline-note">
+            sidecar Claude Code session
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => computerUseControlsRef.current?.stop(entry.terminalId)}
+            disabled={entry.status === "done"}
+          >
+            stop
+          </button>
+        </div>
+        {entry.error && (
+          <div className="computer-use-inline-error">{entry.error}</div>
+        )}
+        {needsMcp && (
+          <div className="computer-use-inline-alert">
+            computer-use is not enabled for this session. Open <code>/mcp</code>{" "}
+            and enable the built-in computer-use server.
+          </div>
+        )}
+        <div
+          ref={containerRef}
+          className="computer-use-inline-terminal"
+          onMouseDown={() => termRef.current?.focus()}
+          title="click here to focus; your keyboard input is sent to the computer-use worker"
+        />
+        <div className="computer-use-inline-controls">
+          <button
+            type="button"
+            className={`btn btn-secondary ${needsMcp ? "mcp-attention" : ""}`}
+            onClick={() => send("/mcp\r")}
+            disabled={!canSend}
+          >
+            open /mcp
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("y")} disabled={!canSend}>
+            y
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("n")} disabled={!canSend}>
+            n
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b[A")} disabled={!canSend}>
+            ↑
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b[B")} disabled={!canSend}>
+            ↓
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("\r")} disabled={!canSend}>
+            enter
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b")} disabled={!canSend}>
+            esc
+          </button>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                sendDraft();
+              }
+            }}
+            placeholder="reply to computer-use worker"
+            disabled={!canSend}
+          />
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={sendDraft}
+            disabled={!canSend || !draft.trim()}
+          >
+            send
+          </button>
+        </div>
+        <div className="computer-use-inline-hint">
+          macOS privacy prompts still need to be approved in the system dialog.
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Module-level handler set by App so markdown links can open in the side
 // preview panel without us re-creating mdComponents on every render.
