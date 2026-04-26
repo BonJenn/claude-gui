@@ -141,13 +141,60 @@ jobs:
 
       - run: npm ci
 
+      - name: Prepare macOS signing keychain
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          certificate_path="$RUNNER_TEMP/apple-certificate.p12"
+          keychain_path="$RUNNER_TEMP/blackcrab-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild \
+            >/dev/null
+
+          while IFS= read -r identity; do
+            if [[ "$identity" =~ ^[[:space:]]*[0-9]+\)\ ([A-F0-9]+)\ \"(.+)\"$ ]]; then
+              certificate_hash="${BASH_REMATCH[1]}"
+              certificate_name="${BASH_REMATCH[2]}"
+              if [[ "$certificate_name" != "$APPLE_SIGNING_IDENTITY" ]]; then
+                security delete-identity -Z "$certificate_hash" "$keychain_path" >/dev/null
+              fi
+            fi
+          done < <(security find-identity -v -p codesigning "$keychain_path")
+
+          if ! security find-identity -v -p codesigning "$keychain_path" | grep -F "\"$APPLE_SIGNING_IDENTITY\""; then
+            echo "::error::APPLE_CERTIFICATE does not contain $APPLE_SIGNING_IDENTITY."
+            exit 1
+          fi
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path" >/dev/null
+
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | sed 's/^ *"//;s/"$//')
+          security default-keychain -d user -s "$keychain_path"
+
       - uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
