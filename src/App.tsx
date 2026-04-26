@@ -1469,9 +1469,29 @@ function App() {
     localStorage.setItem("gridPanels", JSON.stringify(gridPanels));
   }, [gridPanels]);
 
-
   // ⌘K / Ctrl+K opens the command palette; ⌘J / Ctrl+J toggles the
   // integrated terminal panel.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen("blackcrab-open-settings", () => {
+      setSettingsOpen(true);
+    })
+      .then((cleanup) => {
+        if (cancelled) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
@@ -3776,27 +3796,6 @@ function App() {
               title="grid mode (show up to 6 conversations)"
             >
               ⊞ grid
-            </button>
-            <div className="theme-toggle" role="group" aria-label="theme">
-              {THEME_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={`theme-btn ${theme === opt.value ? "active" : ""}`}
-                  onClick={() => setTheme(opt.value)}
-                  title={`${opt.label.toLowerCase()} mode`}
-                >
-                  {opt.glyph}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className={`btn btn-secondary grid-mode-toggle ${settingsOpen ? "active" : ""}`}
-              onClick={() => setSettingsOpen(true)}
-              title="settings"
-            >
-              settings
             </button>
           </div>
         </header>

@@ -696,43 +696,6 @@ body {
   line-height: 1;
 }
 
-/* ---------- theme toggle ---------- */
-
-.theme-toggle {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg-elev-2);
-  align-self: center;
-  flex: 0 0 auto;
-}
-
-.theme-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-faint);
-  padding: 6px 10px;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  transition: background 0.12s, color 0.12s;
-}
-
-.theme-btn:hover {
-  color: var(--text);
-  background: var(--bg-elev);
-}
-
-.theme-btn.active {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.theme-btn + .theme-btn {
-  border-left: 1px solid var(--border);
-}
-
 .cwd-row {
   display: flex;
   gap: 4px;

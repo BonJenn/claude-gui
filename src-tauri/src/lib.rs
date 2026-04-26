@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -12,6 +13,8 @@ struct Session {
     child: Child,
     stdin: ChildStdin,
 }
+
+const OPEN_SETTINGS_EVENT: &str = "blackcrab-open-settings";
 
 // Live PTY-backed terminal. The master writer is wrapped in a std Mutex
 // because portable_pty's writer isn't Send+Sync-friendly for tokio's
@@ -1487,6 +1490,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .menu(blackcrab_menu)
+        .on_menu_event(|app, event| {
+            if event.id() == OPEN_SETTINGS_EVENT {
+                let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+            }
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             claude_preflight,
@@ -1517,4 +1526,27 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn blackcrab_menu(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app_handle)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let settings = MenuItem::with_id(
+            app_handle,
+            OPEN_SETTINGS_EVENT,
+            "Settings...",
+            true,
+            Some("CmdOrCtrl+,"),
+        )?;
+        let separator = PredefinedMenuItem::separator(app_handle)?;
+        let items = menu.items()?;
+
+        if let Some(app_menu) = items.first().and_then(|item| item.as_submenu()) {
+            app_menu.insert_items(&[&settings, &separator], 2)?;
+        }
+    }
+
+    Ok(menu)
 }
