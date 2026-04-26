@@ -236,8 +236,10 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          shopt -s globstar nullglob
-          dmgs=(src-tauri/target/**/bundle/dmg/*.dmg)
+          dmgs=()
+          while IFS= read -r -d '' dmg; do
+            dmgs+=("$dmg")
+          done < <(find src-tauri/target -type f -path '*/bundle/dmg/*.dmg' -print0)
 
           if [ "${#dmgs[@]}" -eq 0 ]; then
             echo "::error::No DMG artifacts found to notarize."
