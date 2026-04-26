@@ -1677,6 +1677,189 @@ body[data-resizing="true"] .terminal-resizer::after {
   font-size: 11px;
 }
 
+/* ---------- settings ---------- */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 45;
+  backdrop-filter: blur(4px);
+}
+
+.settings-card {
+  width: min(760px, 94vw);
+  max-height: min(760px, 88vh);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-kicker {
+  margin-bottom: 2px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.settings-body {
+  overflow: auto;
+  padding: 4px 18px 18px;
+}
+
+.settings-section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.settings-section h3 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 38px;
+}
+
+.settings-row + .settings-row,
+.settings-check-row + .settings-check-row,
+.settings-row + .settings-check-row,
+.settings-check-row + .settings-row {
+  margin-top: 8px;
+}
+
+.settings-label {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.settings-control {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-control select,
+.settings-control input[type="text"],
+.settings-control input:not([type]) {
+  width: 100%;
+  min-width: 0;
+}
+
+.settings-path-control {
+  flex-wrap: wrap;
+}
+
+.settings-path-control input {
+  flex: 1 1 280px;
+  min-width: 180px;
+  font-family: var(--mono);
+}
+
+.settings-segment {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+}
+
+.settings-segment-btn {
+  min-width: 76px;
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  border-right: 1px solid var(--border);
+  padding: 7px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-segment-btn:last-child {
+  border-right: none;
+}
+
+.settings-segment-btn:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
+.settings-segment-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.settings-check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-check-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  .settings-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .settings-segment {
+    width: 100%;
+  }
+
+  .settings-segment-btn {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 .permission-card,
 .permission-prompt {
   max-width: 560px;

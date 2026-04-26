@@ -162,6 +162,67 @@ type ClaudePreflight = {
   error: string;
 };
 
+type AppTheme = "light" | "dark" | "jet";
+type PermissionMode = "bypassPermissions" | "acceptEdits" | "default" | "plan";
+type NewPanelWorktreeMode = "ask" | "always" | "never";
+
+type AppSettings = {
+  startupCwd: string;
+  defaultModel: string;
+  defaultPermissionMode: PermissionMode;
+  notifyOnTurnComplete: boolean;
+  autoCheckUpdates: boolean;
+  autoOpenPreview: boolean;
+  newPanelWorktreeMode: NewPanelWorktreeMode;
+};
+
+const APP_SETTINGS_STORAGE_KEY = "blackcrab.settings";
+
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  startupCwd: "",
+  defaultModel: "",
+  defaultPermissionMode: "bypassPermissions",
+  notifyOnTurnComplete: true,
+  autoCheckUpdates: true,
+  autoOpenPreview: true,
+  newPanelWorktreeMode: "ask",
+};
+
+const THEME_OPTIONS: Array<{ value: AppTheme; label: string; glyph: string }> = [
+  { value: "light", label: "Light", glyph: "☀" },
+  { value: "dark", label: "Dark", glyph: "◐" },
+  { value: "jet", label: "Jet", glyph: "●" },
+];
+
+const MODEL_OPTIONS: Array<{ value: string; label: string; disabled?: boolean }> = [
+  { value: "", label: "default (auto)" },
+  { value: "opus", label: "Opus (latest)" },
+  { value: "sonnet", label: "Sonnet (latest)" },
+  { value: "haiku", label: "Haiku (latest)" },
+  { value: "__sep__", label: "──────────", disabled: true },
+  { value: "claude-opus-4-7", label: "claude-opus-4-7" },
+  { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
+  { value: "claude-haiku-4-5", label: "claude-haiku-4-5" },
+  { value: "claude-opus-4-5", label: "claude-opus-4-5" },
+  { value: "claude-sonnet-4-5", label: "claude-sonnet-4-5" },
+];
+
+const PERMISSION_OPTIONS: Array<{ value: PermissionMode; label: string }> = [
+  { value: "bypassPermissions", label: "bypass" },
+  { value: "acceptEdits", label: "acceptEdits" },
+  { value: "default", label: "default" },
+  { value: "plan", label: "plan" },
+];
+
+const NEW_PANEL_WORKTREE_OPTIONS: Array<{
+  value: NewPanelWorktreeMode;
+  label: string;
+}> = [
+  { value: "ask", label: "ask each time" },
+  { value: "always", label: "always use worktrees" },
+  { value: "never", label: "never use worktrees" },
+];
+
 export const REPLAY_SKIP = new Set([
   "queue-operation",
   "last-prompt",
@@ -183,6 +244,67 @@ export const SESSION_TAIL_LIMIT = 200;
 const DRAFTS_STORAGE_KEY = "composerDrafts";
 const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 type DraftStore = Record<string, { text: string; updated_ms: number }>;
+
+function isPermissionMode(v: unknown): v is PermissionMode {
+  return (
+    v === "bypassPermissions" ||
+    v === "acceptEdits" ||
+    v === "default" ||
+    v === "plan"
+  );
+}
+
+function isNewPanelWorktreeMode(v: unknown): v is NewPanelWorktreeMode {
+  return v === "ask" || v === "always" || v === "never";
+}
+
+function loadAppSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
+    if (!raw) return DEFAULT_APP_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      startupCwd:
+        typeof parsed.startupCwd === "string"
+          ? parsed.startupCwd
+          : DEFAULT_APP_SETTINGS.startupCwd,
+      defaultModel:
+        typeof parsed.defaultModel === "string"
+          ? parsed.defaultModel
+          : DEFAULT_APP_SETTINGS.defaultModel,
+      defaultPermissionMode: isPermissionMode(parsed.defaultPermissionMode)
+        ? parsed.defaultPermissionMode
+        : DEFAULT_APP_SETTINGS.defaultPermissionMode,
+      notifyOnTurnComplete:
+        typeof parsed.notifyOnTurnComplete === "boolean"
+          ? parsed.notifyOnTurnComplete
+          : DEFAULT_APP_SETTINGS.notifyOnTurnComplete,
+      autoCheckUpdates:
+        typeof parsed.autoCheckUpdates === "boolean"
+          ? parsed.autoCheckUpdates
+          : DEFAULT_APP_SETTINGS.autoCheckUpdates,
+      autoOpenPreview:
+        typeof parsed.autoOpenPreview === "boolean"
+          ? parsed.autoOpenPreview
+          : DEFAULT_APP_SETTINGS.autoOpenPreview,
+      newPanelWorktreeMode: isNewPanelWorktreeMode(
+        parsed.newPanelWorktreeMode,
+      )
+        ? parsed.newPanelWorktreeMode
+        : DEFAULT_APP_SETTINGS.newPanelWorktreeMode,
+    };
+  } catch {
+    return DEFAULT_APP_SETTINGS;
+  }
+}
+
+function saveAppSettings(settings: AppSettings): void {
+  try {
+    localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // localStorage full / private mode — treat settings persistence as best effort.
+  }
+}
 
 function loadDrafts(): DraftStore {
   try {
@@ -257,6 +379,13 @@ export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function isTauriRuntime(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+  );
+}
+
 // Fire a native OS notification when a turn finishes, but only if the
 // window isn't already focused (no point interrupting the user who's
 // watching the transcript). First call lazily requests permission;
@@ -267,6 +396,8 @@ export async function notifyTurnComplete(opts: {
   body: string;
   isError?: boolean;
 }) {
+  if (!isTauriRuntime()) return;
+  if (!loadAppSettings().notifyOnTurnComplete) return;
   if (typeof document !== "undefined" && document.hasFocus()) return;
   if (notificationPermissionState === "denied") return;
   try {
@@ -408,6 +539,7 @@ const githubRepoCache = new Map<string, string>();
 
 async function getGithubRepo(cwd: string): Promise<string> {
   if (!cwd) return "";
+  if (!isTauriRuntime()) return "";
   const cached = githubRepoCache.get(cwd);
   if (cached !== undefined) return cached;
   try {
@@ -587,9 +719,15 @@ function ric(timeout = 500): Promise<void> {
 }
 
 function App() {
-  const [cwd, setCwd] = useState<string>("");
-  const [model, setModel] = useState<string>("");
-  const [permissionMode, setPermissionMode] = useState<string>("bypassPermissions");
+  const [appSettings, setAppSettings] = useState<AppSettings>(() =>
+    loadAppSettings(),
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [cwd, setCwd] = useState<string>(() => appSettings.startupCwd);
+  const [model, setModel] = useState<string>(() => appSettings.defaultModel);
+  const [permissionMode, setPermissionMode] = useState<string>(
+    () => appSettings.defaultPermissionMode,
+  );
   const [sessionOn, setSessionOn] = useState(false);
   const [sessionMeta, setSessionMeta] = useState<{
     sessionId?: string;
@@ -766,6 +904,20 @@ function App() {
     setSidebarSelectedSessionId(id);
     _setActiveSessionIdState(id);
   }, []);
+  useEffect(() => {
+    saveAppSettings(appSettings);
+  }, [appSettings]);
+  const updateAppSettings = useCallback((patch: Partial<AppSettings>) => {
+    setAppSettings((prev) => ({ ...prev, ...patch }));
+  }, []);
+  useEffect(() => {
+    if (activeSessionId || sessionOn) return;
+    setModel(appSettings.defaultModel);
+  }, [appSettings.defaultModel, activeSessionId, sessionOn]);
+  useEffect(() => {
+    if (activeSessionId || sessionOn) return;
+    setPermissionMode(appSettings.defaultPermissionMode);
+  }, [appSettings.defaultPermissionMode, activeSessionId, sessionOn]);
   // Keep-alive map of recent sessions' transcripts. Holds the ACTIVE
   // session's live entries as well as a handful of recent inactive ones
   // so switching back to them is instant — no DOM teardown cost. Capped
@@ -974,6 +1126,9 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
       } else if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
         e.preventDefault();
         setTerminalOpen((v) => !v);
@@ -1087,8 +1242,15 @@ function App() {
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     let unlisten: (() => void) | null = null;
-    getCurrentWebview()
+    let currentWebview: ReturnType<typeof getCurrentWebview>;
+    try {
+      currentWebview = getCurrentWebview();
+    } catch {
+      return;
+    }
+    currentWebview
       .onDragDropEvent((e) => {
         if (e.payload.type === "enter" || e.payload.type === "over") {
           setDragOver(true);
@@ -1234,6 +1396,7 @@ function App() {
   }, []);
 
   const autoDetectUrl = useCallback((text: string) => {
+    if (!appSettings.autoOpenPreview) return;
     const urls = extractLocalUrls(text);
     if (!urls.length) return;
     for (const raw of urls) {
@@ -1244,9 +1407,9 @@ function App() {
         setPreviewOpen(true);
       }
     }
-  }, []);
+  }, [appSettings.autoOpenPreview]);
 
-  const [theme, setTheme] = useState<"light" | "dark" | "jet">(() => {
+  const [theme, setTheme] = useState<AppTheme>(() => {
     const saved = localStorage.getItem("theme");
     if (saved === "light" || saved === "dark" || saved === "jet") return saved;
     return "dark";
@@ -1333,11 +1496,35 @@ function App() {
   }, [entries, activeSessionId]);
 
   useEffect(() => {
+    if (appSettings.startupCwd) {
+      setCwd(appSettings.startupCwd);
+      return;
+    }
+    if (!isTauriRuntime()) {
+      setCwd("/");
+      return;
+    }
     invoke<string>("default_cwd").then(setCwd).catch(() => setCwd("/"));
+    // Only hydrate cwd on launch. Later settings changes are applied by the
+    // settings modal handlers so they don't unexpectedly move an active session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refreshClaudePreflight = useCallback(async () => {
     setClaudePreflightLoading(true);
+    if (!isTauriRuntime()) {
+      setClaudePreflight({
+        installed: true,
+        authenticated: true,
+        version: "browser preview",
+        path: "",
+        auth_method: "",
+        api_provider: "",
+        error: "",
+      });
+      setClaudePreflightLoading(false);
+      return;
+    }
     try {
       const status = await invoke<ClaudePreflight>("claude_preflight");
       setClaudePreflight(status);
@@ -1369,6 +1556,10 @@ function App() {
   }, [refreshClaudePreflight]);
 
   const checkForUpdates = useCallback(async (manual = false) => {
+    if (!isTauriRuntime()) {
+      if (manual) notify("Updates are checked in the desktop app", "info");
+      return;
+    }
     if (updateCheckingRef.current) return;
     updateCheckingRef.current = true;
     setUpdateChecking(true);
@@ -1396,11 +1587,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!appSettings.autoCheckUpdates) return;
     const t = window.setTimeout(() => {
       void checkForUpdates(false);
     }, 2500);
     return () => window.clearTimeout(t);
-  }, [checkForUpdates]);
+  }, [appSettings.autoCheckUpdates, checkForUpdates]);
 
   const installAvailableUpdate = useCallback(async () => {
     if (!availableUpdate || updateInstalling) return;
@@ -1439,6 +1631,11 @@ function App() {
   }, [busy]);
 
   const refreshSessions = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setSessions([]);
+      setSessionsLoading(false);
+      return;
+    }
     setSessionsLoading(true);
     try {
       const list = await invoke<SessionInfo[]>("list_sessions");
@@ -1506,6 +1703,10 @@ function App() {
   );
 
   const refreshBranches = useCallback(async (targetCwd: string) => {
+    if (!isTauriRuntime()) {
+      setBranchInfo(null);
+      return;
+    }
     if (!targetCwd) {
       setBranchInfo(null);
       return;
@@ -1709,6 +1910,7 @@ function App() {
   }
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     const pending: Promise<() => void>[] = [
       listen<{ panel_id: string; line: string }>("claude-event", (e) => {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
@@ -2179,6 +2381,8 @@ function App() {
       }
     }
     resetSessionState();
+    setModel(appSettings.defaultModel);
+    setPermissionMode(appSettings.defaultPermissionMode);
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
@@ -2209,11 +2413,15 @@ function App() {
     }
     let useWorktree = false;
     if (isRepo) {
-      const choice = await new Promise<boolean | null>((resolve) => {
-        setWorktreePrompt({ cwd: chosen!, resolve });
-      });
-      if (choice === null) return; // user cancelled the modal
-      useWorktree = choice;
+      if (appSettings.newPanelWorktreeMode === "always") {
+        useWorktree = true;
+      } else if (appSettings.newPanelWorktreeMode === "ask") {
+        const choice = await new Promise<boolean | null>((resolve) => {
+          setWorktreePrompt({ cwd: chosen!, resolve });
+        });
+        if (choice === null) return; // user cancelled the modal
+        useWorktree = choice;
+      }
     }
     const key = `new:${randomId()}:${Date.now()}`;
     setNewPanelCwds((m) => ({ ...m, [key]: chosen! }));
@@ -2639,6 +2847,10 @@ function App() {
   // autocomplete simply shows no suggestions.
   useEffect(() => {
     if (!cwd) return;
+    if (!isTauriRuntime()) {
+      setFileMentions([]);
+      return;
+    }
     if (fileMentionsCwdRef.current === cwd) return;
     fileMentionsCwdRef.current = cwd;
     invoke<string[]>("list_tracked_files", { cwd })
@@ -2808,6 +3020,27 @@ function App() {
   const onSidebarNew = useEvent(() => {
     newSession();
   });
+  const pickStartupCwd = useEvent(async () => {
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: appSettings.startupCwd || cwd,
+      });
+      if (typeof selected !== "string" || !selected) return;
+      updateAppSettings({ startupCwd: selected });
+      if (!sessionOn) setCwd(selected);
+    } catch (e) {
+      console.error(e);
+    }
+  });
+  const useCurrentCwdForStartup = useEvent(() => {
+    if (!cwd) return;
+    updateAppSettings({ startupCwd: cwd });
+  });
+  const clearStartupCwd = useEvent(() => {
+    updateAppSettings({ startupCwd: "" });
+  });
   const sidebarActiveId = gridMode
     ? selectedGridPanelId
       ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
@@ -2847,7 +3080,13 @@ function App() {
       {authErrorSeen && (
         <AuthErrorModal
           onDismiss={() => setAuthErrorSeen(false)}
-          onQuit={() => getCurrentWindow().close().catch(() => {})}
+          onQuit={() => {
+            if (!isTauriRuntime()) {
+              setAuthErrorSeen(false);
+              return;
+            }
+            getCurrentWindow().close().catch(() => {});
+          }}
         />
       )}
       {paletteOpen && (
@@ -2876,6 +3115,15 @@ function App() {
               run: () => {
                 setTheme((t) => nextTheme(t));
                 setPaletteOpen(false);
+              },
+            },
+            {
+              id: "settings",
+              title: "Open settings",
+              hint: "⌘,",
+              run: () => {
+                setPaletteOpen(false);
+                setSettingsOpen(true);
               },
             },
             {
@@ -2963,6 +3211,20 @@ function App() {
                 ]
               : []),
           ]}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsModal
+          settings={appSettings}
+          theme={theme}
+          grouped={groupByProject}
+          onClose={() => setSettingsOpen(false)}
+          onSettingsChange={updateAppSettings}
+          onThemeChange={setTheme}
+          onGroupedChange={setGroupByProject}
+          onPickStartupCwd={pickStartupCwd}
+          onUseCurrentCwd={useCurrentCwdForStartup}
+          onClearStartupCwd={clearStartupCwd}
         />
       )}
       {worktreePrompt && (
@@ -3065,16 +3327,15 @@ function App() {
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               >
-                <option value="">default (auto)</option>
-                <option value="opus">Opus (latest)</option>
-                <option value="sonnet">Sonnet (latest)</option>
-                <option value="haiku">Haiku (latest)</option>
-                <option disabled>──────────</option>
-                <option value="claude-opus-4-7">claude-opus-4-7</option>
-                <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-                <option value="claude-haiku-4-5">claude-haiku-4-5</option>
-                <option value="claude-opus-4-5">claude-opus-4-5</option>
-                <option value="claude-sonnet-4-5">claude-sonnet-4-5</option>
+                {MODEL_OPTIONS.map((opt) => (
+                  <option
+                    key={opt.value}
+                    value={opt.disabled ? "" : opt.value}
+                    disabled={opt.disabled}
+                  >
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="field field-sm">
@@ -3092,10 +3353,11 @@ function App() {
                   }
                 }}
               >
-                <option value="bypassPermissions">bypass</option>
-                <option value="acceptEdits">acceptEdits</option>
-                <option value="default">default</option>
-                <option value="plan">plan</option>
+                {PERMISSION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
             <button
@@ -3153,18 +3415,26 @@ function App() {
               ⊞ grid
             </button>
             <div className="theme-toggle" role="group" aria-label="theme">
-              {(["light", "dark", "jet"] as const).map((t) => (
+              {THEME_OPTIONS.map((opt) => (
                 <button
-                  key={t}
+                  key={opt.value}
                   type="button"
-                  className={`theme-btn ${theme === t ? "active" : ""}`}
-                  onClick={() => setTheme(t)}
-                  title={`${t} mode`}
+                  className={`theme-btn ${theme === opt.value ? "active" : ""}`}
+                  onClick={() => setTheme(opt.value)}
+                  title={`${opt.label.toLowerCase()} mode`}
                 >
-                  {t === "light" ? "☀" : t === "dark" ? "◐" : "●"}
+                  {opt.glyph}
                 </button>
               ))}
             </div>
+            <button
+              type="button"
+              className={`btn btn-secondary grid-mode-toggle ${settingsOpen ? "active" : ""}`}
+              onClick={() => setSettingsOpen(true)}
+              title="settings"
+            >
+              settings
+            </button>
           </div>
         </header>
 
@@ -3756,6 +4026,234 @@ function UpdateBanner({
   );
 }
 
+function SettingsModal({
+  settings,
+  theme,
+  grouped,
+  onClose,
+  onSettingsChange,
+  onThemeChange,
+  onGroupedChange,
+  onPickStartupCwd,
+  onUseCurrentCwd,
+  onClearStartupCwd,
+}: {
+  settings: AppSettings;
+  theme: AppTheme;
+  grouped: boolean;
+  onClose: () => void;
+  onSettingsChange: (patch: Partial<AppSettings>) => void;
+  onThemeChange: (theme: AppTheme) => void;
+  onGroupedChange: (grouped: boolean) => void;
+  onPickStartupCwd: () => void;
+  onUseCurrentCwd: () => void;
+  onClearStartupCwd: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="settings-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="settings-card">
+        <div className="settings-head">
+          <div>
+            <div className="settings-kicker">Preferences</div>
+            <h2 id="settings-title">Settings</h2>
+          </div>
+          <button
+            type="button"
+            className="grid-panel-close"
+            onClick={onClose}
+            title="close settings"
+            aria-label="close settings"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="settings-body">
+          <section className="settings-section">
+            <h3>Appearance</h3>
+            <div className="settings-row">
+              <span className="settings-label">Theme</span>
+              <div className="settings-control">
+                <div className="settings-segment" role="group" aria-label="theme">
+                  {THEME_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      className={`settings-segment-btn ${
+                        theme === opt.value ? "active" : ""
+                      }`}
+                      onClick={() => onThemeChange(opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <label className="settings-check-row">
+              <input
+                type="checkbox"
+                checked={grouped}
+                onChange={(e) => onGroupedChange(e.target.checked)}
+              />
+              <span>Group sidebar by project</span>
+            </label>
+          </section>
+
+          <section className="settings-section">
+            <h3>New Sessions</h3>
+            <div className="settings-row">
+              <span className="settings-label">Startup project</span>
+              <div className="settings-control settings-path-control">
+                <input
+                  value={settings.startupCwd}
+                  readOnly
+                  spellCheck={false}
+                  placeholder="system default"
+                  title={settings.startupCwd || "system default"}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onPickStartupCwd}
+                >
+                  Pick
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onUseCurrentCwd}
+                >
+                  Current
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onClearStartupCwd}
+                  disabled={!settings.startupCwd}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Model</span>
+              <div className="settings-control">
+                <select
+                  value={settings.defaultModel}
+                  onChange={(e) =>
+                    onSettingsChange({ defaultModel: e.target.value })
+                  }
+                >
+                  {MODEL_OPTIONS.map((opt) => (
+                    <option
+                      key={opt.value}
+                      value={opt.disabled ? "" : opt.value}
+                      disabled={opt.disabled}
+                    >
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Permissions</span>
+              <div className="settings-control">
+                <select
+                  value={settings.defaultPermissionMode}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (isPermissionMode(value)) {
+                      onSettingsChange({ defaultPermissionMode: value });
+                    }
+                  }}
+                >
+                  {PERMISSION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Grid worktrees</span>
+              <div className="settings-control">
+                <select
+                  value={settings.newPanelWorktreeMode}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (isNewPanelWorktreeMode(value)) {
+                      onSettingsChange({ newPanelWorktreeMode: value });
+                    }
+                  }}
+                >
+                  {NEW_PANEL_WORKTREE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h3>Behavior</h3>
+            <label className="settings-check-row">
+              <input
+                type="checkbox"
+                checked={settings.notifyOnTurnComplete}
+                onChange={(e) =>
+                  onSettingsChange({ notifyOnTurnComplete: e.target.checked })
+                }
+              />
+              <span>Notify when turns finish</span>
+            </label>
+            <label className="settings-check-row">
+              <input
+                type="checkbox"
+                checked={settings.autoCheckUpdates}
+                onChange={(e) =>
+                  onSettingsChange({ autoCheckUpdates: e.target.checked })
+                }
+              />
+              <span>Check for updates on launch</span>
+            </label>
+            <label className="settings-check-row">
+              <input
+                type="checkbox"
+                checked={settings.autoOpenPreview}
+                onChange={(e) =>
+                  onSettingsChange({ autoOpenPreview: e.target.checked })
+                }
+              />
+              <span>Auto-open local preview links</span>
+            </label>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // In-transcript find overlay. Walks the text nodes under `scrollRef`,
 // wraps matches in <mark.search-match>, cycles current match with
 // next/prev (Enter / Shift+Enter). Closes on Esc or explicit click.
@@ -3980,9 +4478,14 @@ function PreviewPanel({
         <button
           type="button"
           className="icon-btn"
-          onClick={() =>
-            url && openUrl(url).catch((err) => console.error("openUrl failed:", err))
-          }
+          onClick={() => {
+            if (!url) return;
+            if (!isTauriRuntime()) {
+              window.open(url, "_blank", "noopener,noreferrer");
+              return;
+            }
+            openUrl(url).catch((err) => console.error("openUrl failed:", err));
+          }}
           title="open in browser"
           disabled={!canPreview}
         >
@@ -3999,7 +4502,11 @@ function PreviewPanel({
       </div>
       <div className="preview-body">
         {canPreview ? (
-          <NativePreview url={url} reloadKey={reloadKey} />
+          isTauriRuntime() ? (
+            <NativePreview url={url} reloadKey={reloadKey} />
+          ) : (
+            <BrowserPreview url={url} reloadKey={reloadKey} />
+          )
         ) : (
           <div className="preview-empty">
             enter a URL above or wait for Claude to start a local server
@@ -4007,6 +4514,18 @@ function PreviewPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function BrowserPreview({ url, reloadKey }: { url: string; reloadKey: number }) {
+  return (
+    <iframe
+      key={`${url}:${reloadKey}`}
+      className="preview-frame"
+      src={url}
+      title="preview"
+      sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+    />
   );
 }
 
@@ -5810,7 +6329,7 @@ function LiveGrid({
 }
 
 
-function nextTheme(t: "light" | "dark" | "jet"): "light" | "dark" | "jet" {
+function nextTheme(t: AppTheme): AppTheme {
   if (t === "light") return "dark";
   if (t === "dark") return "jet";
   return "light";
