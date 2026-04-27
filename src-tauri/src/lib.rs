@@ -50,6 +50,11 @@ struct SessionInfo {
     output_tokens: u64,
     model: String,
     permission_mode: String,
+    archived: bool,
+    interrupted: bool,
+    last_event_type: String,
+    last_result_subtype: String,
+    last_result_is_error: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -894,6 +899,10 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
     let mut total_cost: f64 = 0.0;
     let mut model = String::new();
     let mut permission_mode = String::new();
+    let mut archived = false;
+    let mut last_event_type = String::new();
+    let mut last_result_subtype = String::new();
+    let mut last_result_is_error = false;
     // Authoritative contextWindow reported by the CLI in each result
     // event's `modelUsage` map. Indexed by model name so we can pick
     // the main model's window at the end — sub-agents like Haiku have
@@ -927,6 +936,11 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
                     title = s.to_string();
                 }
             }
+            "archive-state" => {
+                if let Some(value) = v.get("archived").and_then(|x| x.as_bool()) {
+                    archived = value;
+                }
+            }
             "ai-title" => {
                 if title.is_empty() {
                     if let Some(s) = v.get("title").and_then(|x| x.as_str()) {
@@ -935,6 +949,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
                 }
             }
             "user" => {
+                last_event_type = t.to_string();
                 message_count += 1;
                 if first_user.is_empty() {
                     if let Some(content_val) = v.pointer("/message/content") {
@@ -958,6 +973,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
                 }
             }
             "assistant" => {
+                last_event_type = t.to_string();
                 message_count += 1;
                 if let Some(m) = v.pointer("/message/model").and_then(|x| x.as_str()) {
                     model = m.to_string();
@@ -987,6 +1003,16 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
                 }
             }
             "result" => {
+                last_event_type = t.to_string();
+                last_result_is_error = v
+                    .get("is_error")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                last_result_subtype = v
+                    .get("subtype")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(cost) = v.get("total_cost_usd").and_then(|x| x.as_f64()) {
                     total_cost = cost;
                 }
@@ -1039,6 +1065,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         .or_else(|| context_window_by_model.values().max().copied())
         .filter(|&cw| cw > 0)
         .unwrap_or_else(|| context_limit_for(&model, max_context_seen));
+    let interrupted = !archived && message_count > 0 && last_event_type != "result";
 
     Some(SessionInfo {
         id,
@@ -1052,6 +1079,11 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         output_tokens,
         model,
         permission_mode,
+        archived,
+        interrupted,
+        last_event_type,
+        last_result_subtype,
+        last_result_is_error,
     })
 }
 
@@ -1243,11 +1275,12 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
 }
 
 // Internal event types we never surface in the transcript.
-const REPLAY_SKIP_TYPES: [&str; 6] = [
+const REPLAY_SKIP_TYPES: [&str; 7] = [
     "queue-operation",
     "last-prompt",
     "ai-title",
     "custom-title",
+    "archive-state",
     "attachment",
     "system",
 ];
@@ -1328,6 +1361,28 @@ fn set_session_title(session_id: String, cwd: String, title: String) -> Result<(
     let record = serde_json::json!({
         "type": "custom-title",
         "customTitle": trimmed,
+        "timestamp": chrono_now_iso(),
+    });
+    let line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{}", line).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_session_archived(session_id: String, cwd: String, archived: bool) -> Result<(), String> {
+    use std::io::Write;
+    let path = session_path(&session_id, &cwd)
+        .ok_or_else(|| "no HOME".to_string())?;
+    if !path.exists() {
+        return Err("session file not found".to_string());
+    }
+    let record = serde_json::json!({
+        "type": "archive-state",
+        "archived": archived,
         "timestamp": chrono_now_iso(),
     });
     let line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
@@ -1514,6 +1569,7 @@ pub fn run() {
             load_session_tail,
             git_remote_url,
             set_session_title,
+            set_session_archived,
             delete_session,
             write_text_file,
             save_dropped_file,
