@@ -156,6 +156,12 @@ type SessionInfo = {
   permission_mode: string;
 };
 
+export type PanelAttentionState =
+  | "engaged"
+  | "permission"
+  | "completed"
+  | "error";
+
 type BranchInfo = {
   is_repo: boolean;
   current: string;
@@ -1830,6 +1836,31 @@ function App() {
     sessionId: string;
     seq: number;
   } | null>(null);
+  const sidebarScrollSeqRef = useRef(0);
+  const [sidebarScrollTarget, setSidebarScrollTarget] = useState<{
+    sessionId: string;
+    seq: number;
+  } | null>(null);
+  const pendingSidebarEngagementRef = useRef(false);
+  const [sidebarFeaturedSessionId, setSidebarFeaturedSessionId] =
+    useState<string | undefined>();
+  const requestSidebarSessionTop = useEvent((sessionId?: string | null) => {
+    if (!sessionId) return;
+    pendingSidebarEngagementRef.current = false;
+    sidebarScrollSeqRef.current += 1;
+    setSidebarFeaturedSessionId(sessionId);
+    setSidebarScrollTarget({
+      sessionId,
+      seq: sidebarScrollSeqRef.current,
+    });
+  });
+  const requestSidebarEngagementTop = useEvent((sessionId?: string | null) => {
+    if (sessionId) {
+      requestSidebarSessionTop(sessionId);
+      return;
+    }
+    pendingSidebarEngagementRef.current = true;
+  });
   const requestTranscriptBottom = useCallback((sessionId: string) => {
     transcriptScrollSeqRef.current += 1;
     setTranscriptScrollRequest({
@@ -2344,6 +2375,7 @@ function App() {
     if (any.type === "control_request") {
       const req = any.request as Record<string, unknown> | undefined;
       if (req && req.subtype === "can_use_tool") {
+        requestSidebarSessionTop(activeSessionIdRef.current);
         setPendingPermission({
           requestId: String(any.request_id ?? ""),
           toolName: String(req.tool_name ?? "unknown"),
@@ -2376,6 +2408,9 @@ function App() {
         });
       }
       setActiveSessionId(newId);
+      if (newId && pendingSidebarEngagementRef.current) {
+        requestSidebarEngagementTop(newId);
+      }
       setEntries((es) => [
         ...es,
         {
@@ -2480,6 +2515,7 @@ function App() {
     }
 
     if (ev.type === "result") {
+      requestSidebarSessionTop(ev.session_id ?? activeSessionIdRef.current);
       setBusy(false);
       streamingIdRef.current = null;
       const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
@@ -2563,6 +2599,7 @@ function App() {
     // API call itself fails. Surface them clearly.
     const evAny = ev as { type?: string; error?: unknown; message?: unknown };
     if (evAny.type === "error") {
+      requestSidebarSessionTop(activeSessionIdRef.current);
       setBusy(false);
       const errObj = evAny.error as { message?: string; type?: string } | string | undefined;
       const msg =
@@ -3098,6 +3135,7 @@ function App() {
   // and attachment handling.
   async function sendQuickReply(text: string) {
     if (busy || !text) return;
+    requestSidebarEngagementTop(activeSessionIdRef.current);
     if (startPromiseRef.current) {
       try {
         await startPromiseRef.current;
@@ -3148,6 +3186,7 @@ function App() {
   async function send() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || busy) return;
+    requestSidebarEngagementTop(activeSessionIdRef.current);
 
     if (startPromiseRef.current) {
       try {
@@ -3385,6 +3424,12 @@ function App() {
   const onSidebarNew = useEvent(() => {
     newSession();
   });
+  const onGridPanelAttention = useEvent(
+    (_panelId: string, sid: string, state: PanelAttentionState) => {
+      requestSidebarSessionTop(sid);
+      if (state === "completed" || state === "error") refreshSessions();
+    },
+  );
   const pickStartupCwd = useEvent(async () => {
     try {
       const selected = await openDialog({
@@ -3630,7 +3675,8 @@ function App() {
       <Sidebar
         sessions={sessions}
         activeId={sidebarActiveId}
-        pinActiveToTop={!gridMode}
+        featuredId={sidebarFeaturedSessionId}
+        scrollTarget={sidebarScrollTarget}
         loading={sessionsLoading}
         resumingId={resumingId}
         onResume={onSidebarResume}
@@ -3821,6 +3867,7 @@ function App() {
               );
               refreshSessions();
             }}
+            onPanelAttention={onGridPanelAttention}
             onExpand={async (sid, panelCwd, panelId) => {
               // Double-click on a grid tile: hand off ownership to
               // single-view. The grid LivePanel's unmount cleanup also
@@ -3986,6 +4033,7 @@ function App() {
                   });
                   setSessionOn(true);
                   if (resendText) {
+                    requestSidebarEngagementTop(sid);
                     setEntries((es) => [
                       ...es,
                       {
@@ -5214,6 +5262,8 @@ function barColor(ratio: number): string {
 const Sidebar = memo(function Sidebar({
   sessions,
   activeId,
+  featuredId,
+  scrollTarget,
   loading,
   resumingId,
   onResume,
@@ -5230,10 +5280,11 @@ const Sidebar = memo(function Sidebar({
   onGroupedChange,
   width,
   onResizeStart,
-  pinActiveToTop = true,
 }: {
   sessions: SessionInfo[];
   activeId?: string;
+  featuredId?: string;
+  scrollTarget: { sessionId: string; seq: number } | null;
   loading: boolean;
   resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
@@ -5250,24 +5301,72 @@ const Sidebar = memo(function Sidebar({
   onGroupedChange: (value: boolean) => void;
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
-  /** When false, activeId is used for highlight only — the list
-   *  doesn't float the active item to the top or scroll to it. Used
-   *  in grid mode so clicking between tiles doesn't reshuffle the
-   *  sidebar. */
-  pinActiveToTop?: boolean;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const scrollFrameIdsRef = useRef<number[]>([]);
+  const handledScrollSeqRef = useRef(0);
 
-  // The active session is reordered to the top of the filtered list, so
-  // snapping the sidebar to scrollTop: 0 puts it in view immediately.
-  // Skipped when pinActiveToTop is false (grid-mode highlight).
+  const cancelSidebarScroll = useCallback(() => {
+    for (const id of scrollFrameIdsRef.current) {
+      window.cancelAnimationFrame(id);
+    }
+    scrollFrameIdsRef.current = [];
+  }, []);
+
+  const animateScrollTop = useCallback(
+    (el: HTMLElement, requestedTop: number) => {
+      const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      const targetTop = Math.max(0, Math.min(maxTop, requestedTop));
+      const startTop = el.scrollTop;
+      const distance = targetTop - startTop;
+      if (Math.abs(distance) < 0.5) {
+        el.scrollTop = targetTop;
+        return;
+      }
+      const prefersReducedMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      if (prefersReducedMotion) {
+        el.scrollTop = targetTop;
+        return;
+      }
+
+      const duration = Math.max(
+        280,
+        Math.min(900, 220 + Math.abs(distance) * 0.22),
+      );
+      const startedAt = performance.now();
+      const easeOutQuint = (t: number) => 1 - Math.pow(1 - t, 5);
+      const step = (now: number) => {
+        const t = Math.min(1, (now - startedAt) / duration);
+        el.scrollTop = startTop + distance * easeOutQuint(t);
+        if (t < 1) {
+          scrollFrameIdsRef.current.push(window.requestAnimationFrame(step));
+        } else {
+          el.scrollTop = targetTop;
+        }
+      };
+      scrollFrameIdsRef.current.push(window.requestAnimationFrame(step));
+    },
+    [],
+  );
+
+  useEffect(() => cancelSidebarScroll, [cancelSidebarScroll]);
+
   useEffect(() => {
-    if (!activeId || !pinActiveToTop) return;
     const list = listRef.current;
     if (!list) return;
-    list.scrollTo({ top: 0, behavior: "auto" });
-  }, [activeId, pinActiveToTop]);
+    const cancel = () => cancelSidebarScroll();
+    list.addEventListener("wheel", cancel, { passive: true });
+    list.addEventListener("touchmove", cancel, { passive: true });
+    list.addEventListener("pointerdown", cancel, { passive: true });
+    return () => {
+      list.removeEventListener("wheel", cancel);
+      list.removeEventListener("touchmove", cancel);
+      list.removeEventListener("pointerdown", cancel);
+    };
+  }, [cancelSidebarScroll]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
 
   const projects = useMemo(() => {
@@ -5338,13 +5437,15 @@ const Sidebar = memo(function Sidebar({
       // Fall through to the content-search result map.
       return contentHits ? contentHits.has(s.id) : false;
     });
-    // Only float the active to the top in flat mode — in grouped mode it
-    // belongs under its project header. Also suppressed when pinActiveToTop
-    // is false (grid mode) so tile-switching doesn't reorder the list.
-    if (pinActiveToTop && !grouped && activeId) {
-      const active = matches.find((s) => s.id === activeId);
-      if (active && matches[0]?.id !== activeId) {
-        return [active, ...matches.filter((s) => s.id !== activeId)];
+    // Only float sessions that had real activity. The active session is a
+    // highlight only, so opening a past conversation doesn't reshuffle the list.
+    if (!grouped && featuredId) {
+      const priority = matches.find((s) => s.id === featuredId);
+      if (priority) {
+        return [
+          priority,
+          ...matches.filter((s) => s.id !== featuredId),
+        ];
       }
     }
     return matches;
@@ -5352,10 +5453,47 @@ const Sidebar = memo(function Sidebar({
     sessions,
     projectFilter,
     search,
-    activeId,
+    featuredId,
     grouped,
-    pinActiveToTop,
     contentHits,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!scrollTarget) return;
+    if (handledScrollSeqRef.current === scrollTarget.seq) return;
+    const list = listRef.current;
+    const item = itemRefs.current.get(scrollTarget.sessionId);
+    if (!list || !item) return;
+
+    handledScrollSeqRef.current = scrollTarget.seq;
+    cancelSidebarScroll();
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const groupBody = item.closest(".session-group-body") as HTMLElement | null;
+
+    if (grouped && groupBody && groupBody !== list) {
+      const groupBodyRect = groupBody.getBoundingClientRect();
+      animateScrollTop(
+        groupBody,
+        groupBody.scrollTop + itemRect.top - groupBodyRect.top - 2,
+      );
+      const group = item.closest(".session-group") as HTMLElement | null;
+      const outerAnchor = group ?? groupBody;
+      const outerRect = outerAnchor.getBoundingClientRect();
+      animateScrollTop(list, list.scrollTop + outerRect.top - listRect.top);
+      return;
+    }
+
+    const pinnedToTop = !grouped && scrollTarget.sessionId === featuredId;
+    const itemTop = list.scrollTop + itemRect.top - listRect.top - 2;
+    animateScrollTop(list, pinnedToTop ? 0 : itemTop);
+  }, [
+    animateScrollTop,
+    cancelSidebarScroll,
+    featuredId,
+    filtered,
+    grouped,
+    scrollTarget,
   ]);
 
   // Group filtered sessions by project basename when the toggle is on.
@@ -6570,6 +6708,7 @@ function LiveGrid({
   onRename,
   onReorder,
   onSessionStarted,
+  onPanelAttention,
   onExpand,
 }: {
   panels: string[];
@@ -6590,6 +6729,11 @@ function LiveGrid({
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onReorder: (fromId: string, toId: string) => void;
   onSessionStarted: (panelId: string, sessionId: string) => void;
+  onPanelAttention: (
+    panelId: string,
+    sessionId: string,
+    state: PanelAttentionState,
+  ) => void;
   onExpand: (sessionId: string, cwd: string, panelId: string) => void;
 }) {
   // Draggable divider between the two rows lets the user rebalance tile
@@ -6844,6 +6988,7 @@ function LiveGrid({
             onRemove={() => onRemove(id)}
             onRename={onRename}
             onSessionStarted={onSessionStarted}
+            onAttention={onPanelAttention}
             onExpand={onExpand}
             dragging={dragId === id}
             dragOver={overId === id && dragId !== null && dragId !== id}

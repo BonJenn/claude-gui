@@ -346,6 +346,7 @@ body {
 .sessions-list {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 0 8px 12px;
   display: flex;
   flex-direction: column;
@@ -372,6 +373,7 @@ body {
   /* Cap each group to ~5 items tall and scroll within */
   max-height: 520px;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 2px 0;
 }
 
