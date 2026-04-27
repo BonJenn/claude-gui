@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      TCC usage strings: macOS shows these to the user the first time
+      Blackcrab tries to read a protected folder (Desktop, Documents,
+      Downloads) so they can grant access. Without these strings the
+      OS silent-denies and `claude` returns EPERM with no UI prompt.
+    -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Blackcrab needs access to your Desktop so Claude Code can read and edit project files in repositories you keep there.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Blackcrab needs access to your Documents folder so Claude Code can read and edit project files there.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Blackcrab needs access to your Downloads folder so Claude Code can work with files you've downloaded.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Blackcrab needs access to removable volumes so Claude Code can work with files on external drives.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Blackcrab needs access to network volumes so Claude Code can work with files on shared drives.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Blackcrab uses Apple Events to launch and control the integrated terminal.</string>
+</dict>
+</plist>

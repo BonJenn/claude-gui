@@ -846,6 +846,22 @@ export function isAuthErrorText(text: string): boolean {
   );
 }
 
+// Filter out known-benign noise from claude's stderr. These lines aren't
+// actionable for the user — they come from claude probing the cwd for
+// git context, dotfiles, etc. and getting expected "not present" errors.
+// Suppressing them keeps the stderr panel useful for real failures.
+export function isBenignStderr(text: string): boolean {
+  if (!text) return true;
+  const s = text.trim();
+  if (!s) return true;
+  return (
+    s.includes("fatal: not a git repository") ||
+    s.includes("fatal: Not a git repository") ||
+    /^fatal: ambiguous argument 'HEAD'/.test(s) ||
+    /^fatal: bad revision 'HEAD'/.test(s)
+  );
+}
+
 // Module-level cache keyed by cwd. `undefined` = not yet queried.
 const githubRepoCache = new Map<string, string>();
 
@@ -1701,18 +1717,45 @@ function App() {
   // grid leaves them in an empty single-mode they can re-populate from
   // the sidebar.
   const prevGridModeRef = useRef(gridMode);
+  // When the user toggles into grid mode while a turn is in flight,
+  // we defer the subprocess handoff until busy=false. Killing the
+  // running claude mid-turn (the original behavior) made it look
+  // like grid mode "paused" the conversation, since --resume can't
+  // pick up an in-flight tool call.
+  const pendingGridHandoffRef = useRef(false);
+  const doGridHandoff = useEvent((sid: string) => {
+    invoke("stop_session", { panelId: "main" }).catch(() => {});
+    setSessionOn(false);
+    setActiveSessionId(undefined);
+    setGridPanels([sid]);
+    setSelectedGridPanelId(sid);
+  });
   useEffect(() => {
     const entering = gridMode && !prevGridModeRef.current;
     prevGridModeRef.current = gridMode;
     if (entering && gridPanels.length === 0 && activeSessionId) {
-      const handoffSid = activeSessionId;
-      invoke("stop_session", { panelId: "main" }).catch(() => {});
-      setSessionOn(false);
-      setActiveSessionId(undefined);
-      setGridPanels([handoffSid]);
-      setSelectedGridPanelId(handoffSid);
+      if (busy) {
+        // Turn in flight — leave the subprocess running and
+        // activeSessionId set so its events keep landing in the
+        // kept-alive transcript. The deferred-handoff effect below
+        // fires when busy goes false.
+        pendingGridHandoffRef.current = true;
+      } else {
+        doGridHandoff(activeSessionId);
+      }
+    } else if (!gridMode) {
+      // User flipped back to single before the deferred handoff
+      // could fire — abandon the pending intent.
+      pendingGridHandoffRef.current = false;
     }
-  }, [gridMode, gridPanels.length, activeSessionId]);
+  }, [gridMode, gridPanels.length, activeSessionId, busy, doGridHandoff]);
+  useEffect(() => {
+    if (busy || !pendingGridHandoffRef.current) return;
+    pendingGridHandoffRef.current = false;
+    if (gridMode && gridPanels.length === 0 && activeSessionId) {
+      doGridHandoff(activeSessionId);
+    }
+  }, [busy, gridMode, gridPanels.length, activeSessionId, doGridHandoff]);
 
   // In grid mode, the topbar mirrors whichever panel is currently selected
   // so cwd/branch/model/permissions stay in sync with what the user is
@@ -2681,6 +2724,10 @@ function App() {
         // stderr counts too — claude logs progress there during long
         // tool invocations.
         setActivityTick((n) => n + 1);
+        // Filter known-benign noise. Claude probes for git context on
+        // many turns and surfaces "fatal: not a git repository" when
+        // the cwd isn't tracked — not actionable, just clutter.
+        if (isBenignStderr(line)) return;
         setStderrLines((s) => [...s, line]);
         if (isAuthErrorText(line)) setAuthErrorSeen(true);
       }),
