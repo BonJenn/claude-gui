@@ -1295,16 +1295,22 @@ function App() {
     () => allTranscripts.get(activeSessionId ?? NEW_SESSION_KEY) ?? [],
     [allTranscripts, activeSessionId],
   );
-  // Watchdog: flip `stuckBusy` to true if busy stays true for 30s
-  // without a new entry landing. Resets every time entries change.
+  // Watchdog: flip `stuckBusy` to true if busy stays true for 60s
+  // without ANY subprocess output. Resets on every claude-event /
+  // claude-stderr arrival (see the activity counter below) — not just
+  // when a new entry lands. Streaming chunks (content_block_delta),
+  // tool-use start/stop events, and status messages all count as
+  // activity even though they don't change entries.length, so a
+  // long-running tool call no longer trips the false-positive banner.
+  const [activityTick, setActivityTick] = useState(0);
   useEffect(() => {
     if (!busy) {
       setStuckBusy(false);
       return;
     }
-    const handle = window.setTimeout(() => setStuckBusy(true), 30_000);
+    const handle = window.setTimeout(() => setStuckBusy(true), 60_000);
     return () => window.clearTimeout(handle);
-  }, [busy, entries.length, activeSessionId]);
+  }, [busy, activityTick, activeSessionId]);
   const setEntries = useCallback(
     (update: Entry[] | ((prev: Entry[]) => Entry[])) => {
       setAllTranscripts((prev) => {
@@ -2657,6 +2663,10 @@ function App() {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
         const line = e.payload?.line;
         if (typeof line !== "string") return;
+        // Any event from the subprocess counts as activity for the
+        // stuck-turn watchdog, even ones that don't add an entry
+        // (content_block_delta, tool-use start/stop, status messages).
+        setActivityTick((n) => n + 1);
         try {
           const ev = JSON.parse(line) as StreamEvent;
           handleEvent(ev);
@@ -2668,6 +2678,9 @@ function App() {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
         const line = e.payload?.line ?? "";
         if (!line) return;
+        // stderr counts too — claude logs progress there during long
+        // tool invocations.
+        setActivityTick((n) => n + 1);
         setStderrLines((s) => [...s, line]);
         if (isAuthErrorText(line)) setAuthErrorSeen(true);
       }),
@@ -4445,8 +4458,8 @@ function App() {
           {stuckBusy && (
             <div className="stuck-banner" role="status">
               <span className="stuck-banner-text">
-                claude has been thinking for 30+ seconds with no output —
-                the subprocess may be wedged.
+                claude has been silent for 60+ seconds — the subprocess
+                may be wedged.
               </span>
               <div className="stuck-banner-actions">
                 <button

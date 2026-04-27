@@ -1537,8 +1537,274 @@ fn load_session_tail(
     Ok(rev)
 }
 
+// ---- macOS keychain-based OAuth flow for Claude Code -----------------
+//
+// `claude login` stores a JSON blob under the `Claude Code-credentials`
+// service in the user's login keychain:
+//   { "claudeAiOauth": { "accessToken": "sk-ant-oat01-...",
+//                        "refreshToken": "sk-ant-ort01-...",
+//                        "expiresAt": <unix-ms>, ... } }
+//
+// Two problems for the .app:
+//
+// 1. When `claude` is spawned from a .app (vs Terminal), macOS Keychain
+//    Services may deny it access because the parent has a different
+//    code-signing identity than the one on the keychain item's ACL.
+//    Bypass by reading via /usr/bin/security ourselves and passing the
+//    token to subprocess via CLAUDE_CODE_OAUTH_TOKEN.
+//
+// 2. OAuth access tokens expire (~1 week). Terminal `claude` refreshes
+//    them automatically on use, but a process that just reads the
+//    keychain once (us) hands subprocess an expired token forever.
+//    Solution: check expiresAt on startup, and if expired or expiring
+//    within 60s, POST to platform.claude.com/v1/oauth/token with the
+//    refresh token. Write the new tokens back into keychain (so
+//    Terminal claude sees them too).
+//
+// `none`/PKCE-style client_id is the public client metadata URL itself.
+// Endpoints discovered from strings inside the claude-code CLI binary.
+#[cfg(target_os = "macos")]
+const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+#[cfg(target_os = "macos")]
+const OAUTH_CLIENT_ID: &str = "https://claude.ai/oauth/claude-code-client-metadata";
+
+#[cfg(target_os = "macos")]
+fn read_keychain_credentials() -> Option<serde_json::Value> {
+    let output = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    serde_json::from_str(raw.trim()).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn write_keychain_credentials(json: &str) -> Result<(), String> {
+    let user = std::env::var("USER").map_err(|_| "no USER".to_string())?;
+    let output = std::process::Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-U", // update if exists
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            &user,
+            "-w",
+            json,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_oauth_via_curl(refresh_token: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+    })
+    .to_string();
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "10",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            OAUTH_TOKEN_URL,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "oauth refresh http exit {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let raw = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn hydrate_keychain_token() {
+    // Don't override anything the user already configured. Either of
+    // these vars short-circuits claude's auth flow and skips keychain.
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some()
+        || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some()
+    {
+        return;
+    }
+    let Some(creds) = read_keychain_credentials() else {
+        return;
+    };
+    let access_token = creds
+        .pointer("/claudeAiOauth/accessToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let refresh_token = creds
+        .pointer("/claudeAiOauth/refreshToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_at = creds
+        .pointer("/claudeAiOauth/expiresAt")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // Refresh proactively if expired or expiring in the next minute.
+    let needs_refresh =
+        expires_at == 0 || now_ms.saturating_add(60_000) >= expires_at;
+
+    if !needs_refresh && !access_token.is_empty() {
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+        return;
+    }
+
+    if refresh_token.is_empty() {
+        // No refresh token to use. Set whatever access token we have so
+        // claude can produce a meaningful 401 → the UI can surface a
+        // re-auth prompt rather than silent failure.
+        if !access_token.is_empty() {
+            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+        }
+        return;
+    }
+
+    match refresh_oauth_via_curl(&refresh_token) {
+        Ok(refreshed) => {
+            let new_access = refreshed
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_refresh = refreshed
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or(refresh_token.as_str());
+            let expires_in_s = refreshed
+                .get("expires_in")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            if new_access.is_empty() {
+                if !access_token.is_empty() {
+                    std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+                }
+                return;
+            }
+
+            let new_expires_at_ms = now_ms + expires_in_s * 1000;
+            // Merge refreshed values into the existing JSON so any
+            // sibling fields claude wrote (scopes, subscriptionType,
+            // rateLimitTier) are preserved. Best-effort write back so
+            // Terminal claude doesn't immediately invalidate them.
+            let mut updated = creds.clone();
+            if let Some(o) = updated
+                .pointer_mut("/claudeAiOauth")
+                .and_then(|v| v.as_object_mut())
+            {
+                o.insert("accessToken".into(), serde_json::json!(new_access));
+                o.insert("refreshToken".into(), serde_json::json!(new_refresh));
+                o.insert(
+                    "expiresAt".into(),
+                    serde_json::json!(new_expires_at_ms),
+                );
+            }
+            let _ = write_keychain_credentials(&updated.to_string());
+
+            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", new_access);
+        }
+        Err(_) => {
+            // Refresh failed (network, revoked, etc.). Fall back to
+            // whatever we have so claude can produce a 401 the UI can
+            // act on.
+            if !access_token.is_empty() {
+                std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+            }
+        }
+    }
+}
+
+// When the .app is launched from Finder/Dock, macOS launchd hands the
+// process a minimal environment — no SHELL config sourcing, no PATH
+// extensions, none of the auth-relevant vars users set in ~/.zshrc
+// (ANTHROPIC_API_KEY, AWS_BEARER_TOKEN_BEDROCK, OAUTH cache paths,
+// etc.). The result: `claude -p` spawned by start_session ends up with
+// whatever sparse creds it can scrape and returns 401.
+//
+// Source the user's login shell once at startup and merge the result
+// into our own env. Subprocess spawns then inherit the rich env. Only
+// runs in non-debug builds and only on unix; in `cargo run` we already
+// have the launching shell's env.
+#[cfg(all(unix, not(debug_assertions)))]
+fn hydrate_login_shell_env() {
+    use std::process::Command as StdCommand;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let output = StdCommand::new(&shell)
+        .arg("-l")
+        .arg("-c")
+        // Print env null-separated so values containing newlines survive.
+        .arg("env -0 2>/dev/null || env")
+        .output();
+    let Ok(output) = output else { return };
+    if !output.status.success() {
+        return;
+    }
+    // Don't clobber things we manage ourselves or that come from the
+    // GUI launch context. PATH especially: claude_path_env() already
+    // augments it with common bin dirs, but we want the shell-provided
+    // PATH to take priority since the user may have added custom dirs.
+    const SKIP: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_"];
+    let bytes = &output.stdout;
+    // Try null-separated first (env -0); fall back to newline.
+    let split: Box<dyn Iterator<Item = &[u8]>> = if bytes.contains(&0) {
+        Box::new(bytes.split(|&b| b == 0))
+    } else {
+        Box::new(bytes.split(|&b| b == b'\n'))
+    };
+    for line in split {
+        if line.is_empty() {
+            continue;
+        }
+        let s = match std::str::from_utf8(line) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let Some((k, v)) = s.split_once('=') else { continue };
+        if k.is_empty() || SKIP.contains(&k) {
+            continue;
+        }
+        std::env::set_var(k, v);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(all(unix, not(debug_assertions)))]
+    hydrate_login_shell_env();
+    #[cfg(target_os = "macos")]
+    hydrate_keychain_token();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
