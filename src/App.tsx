@@ -154,6 +154,11 @@ type SessionInfo = {
   output_tokens: number;
   model: string;
   permission_mode: string;
+  archived: boolean;
+  interrupted: boolean;
+  last_event_type: string;
+  last_result_subtype: string;
+  last_result_is_error: boolean;
 };
 
 export type PanelAttentionState =
@@ -255,6 +260,7 @@ export const REPLAY_SKIP = new Set([
   "last-prompt",
   "ai-title",
   "custom-title",
+  "archive-state",
   "attachment",
   "system",
 ]);
@@ -271,6 +277,38 @@ export const SESSION_TAIL_LIMIT = 200;
 const DRAFTS_STORAGE_KEY = "composerDrafts";
 const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 type DraftStore = Record<string, { text: string; updated_ms: number }>;
+
+type SessionActivityState =
+  | "idle"
+  | "running"
+  | "waiting"
+  | "done"
+  | "error"
+  | "unread"
+  | "interrupted";
+
+type SessionActivity = {
+  state: SessionActivityState;
+  unread: boolean;
+  updated_ms: number;
+  text?: string;
+};
+
+type SessionActivityStore = Record<string, SessionActivity>;
+
+const SESSION_ACTIVITY_STORAGE_KEY = "sidebar.sessionActivity";
+
+function isSessionActivityState(v: unknown): v is SessionActivityState {
+  return (
+    v === "idle" ||
+    v === "running" ||
+    v === "waiting" ||
+    v === "done" ||
+    v === "error" ||
+    v === "unread" ||
+    v === "interrupted"
+  );
+}
 
 function isPermissionMode(v: unknown): v is PermissionMode {
   return (
@@ -367,6 +405,133 @@ function pruneDrafts(d: DraftStore): DraftStore {
   return changed ? out : d;
 }
 
+function loadSessionActivity(): SessionActivityStore {
+  try {
+    const raw = localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: SessionActivityStore = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Partial<SessionActivity>;
+      if (!isSessionActivityState(item.state)) continue;
+      const wasRunning = item.state === "running";
+      const state = wasRunning ? "interrupted" : item.state;
+      out[id] = {
+        state,
+        unread: item.unread === true,
+        updated_ms:
+          typeof item.updated_ms === "number" ? item.updated_ms : Date.now(),
+        text:
+          wasRunning
+            ? "needs recovery"
+            : typeof item.text === "string"
+            ? item.text
+            : state === "interrupted"
+            ? "needs recovery"
+            : undefined,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveSessionActivity(store: SessionActivityStore): void {
+  try {
+    localStorage.setItem(SESSION_ACTIVITY_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // localStorage full / private mode — sidebar activity is best effort.
+  }
+}
+
+function pruneSessionActivity(
+  store: SessionActivityStore,
+  sessions: SessionInfo[],
+): SessionActivityStore {
+  const valid = new Set(sessions.map((s) => s.id));
+  let changed = false;
+  const out: SessionActivityStore = {};
+  for (const [id, activity] of Object.entries(store)) {
+    if (valid.has(id)) {
+      out[id] = activity;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? out : store;
+}
+
+function deriveSessionActivity(
+  session: SessionInfo,
+  store: SessionActivityStore,
+): SessionActivity {
+  const stored = store[session.id];
+  if (stored) return stored;
+  if (session.interrupted) {
+    return {
+      state: "interrupted",
+      unread: false,
+      updated_ms: session.mtime_ms,
+      text: "needs recovery",
+    };
+  }
+  if (session.last_result_is_error) {
+    return {
+      state: "error",
+      unread: false,
+      updated_ms: session.mtime_ms,
+      text: session.last_result_subtype || "last run errored",
+    };
+  }
+  return {
+    state: "idle",
+    unread: false,
+    updated_ms: session.mtime_ms,
+  };
+}
+
+function isAttentionActivity(activity: SessionActivity): boolean {
+  return (
+    activity.unread ||
+    activity.state === "waiting" ||
+    activity.state === "done" ||
+    activity.state === "error" ||
+    activity.state === "interrupted"
+  );
+}
+
+function sessionActivityLabel(activity: SessionActivity): string {
+  switch (activity.state) {
+    case "running":
+      return "running";
+    case "waiting":
+      return "needs input";
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    case "unread":
+      return "unread";
+    case "interrupted":
+      return "recover";
+    default:
+      return activity.unread ? "unread" : "idle";
+  }
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!(
+    el &&
+    (el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.isContentEditable)
+  );
+}
+
 // gridPanels holds two kinds of entries: real session ids (for sidebar-
 // pinned tiles) and "new:uuid:ts" placeholders (for tiles created via
 // "+ new panel"). Once a placeholder's subprocess reports its real
@@ -407,10 +572,34 @@ export function randomId() {
 }
 
 function isTauriRuntime(): boolean {
+  if (typeof window === "undefined") return false;
+  // The standalone web dev server is often opened at 127.0.0.1 from a
+  // Tauri-hosted shell, which can expose partial Tauri globals that are
+  // not wired to Blackcrab's backend.
+  if (window.location.hostname === "127.0.0.1") return false;
+  const internals = (
+    window as Window & {
+      __TAURI_INTERNALS__?: {
+        invoke?: unknown;
+        transformCallback?: unknown;
+      };
+    }
+  ).__TAURI_INTERNALS__;
   return (
-    typeof window !== "undefined" &&
-    !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    !!internals &&
+    typeof internals.invoke === "function" &&
+    typeof internals.transformCallback === "function"
   );
+}
+
+function canUseTauriEventApi(): boolean {
+  if (!isTauriRuntime()) return false;
+  const eventInternals = (
+    window as Window & {
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: unknown;
+    }
+  ).__TAURI_EVENT_PLUGIN_INTERNALS__;
+  return !!eventInternals;
 }
 
 // Fire a native OS notification when a turn finishes, but only if the
@@ -1014,6 +1203,15 @@ function App() {
   const [hasNewBelow, setHasNewBelow] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionActivity, setSessionActivity] =
+    useState<SessionActivityStore>(() => loadSessionActivity());
+  const [sidebarAttentionOnly, setSidebarAttentionOnly] = useState<boolean>(
+    () => localStorage.getItem("sidebar.attentionOnly") === "1",
+  );
+  const [showArchivedSessions, setShowArchivedSessions] = useState<boolean>(
+    () => localStorage.getItem("sidebar.showArchived") === "1",
+  );
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [activeSessionId, _setActiveSessionIdState] =
     useState<string | undefined>();
   const [sidebarSelectedSessionId, setSidebarSelectedSessionId] =
@@ -1026,6 +1224,49 @@ function App() {
     activeSessionIdRef.current = id;
     setSidebarSelectedSessionId(id);
     _setActiveSessionIdState(id);
+  }, []);
+  const markSessionActivity = useCallback(
+    (id: string | undefined, state: SessionActivityState, text?: string) => {
+      if (!id) return;
+      const shouldUnread =
+        state === "waiting" ||
+        state === "done" ||
+        state === "error" ||
+        state === "unread" ||
+        state === "interrupted";
+      const isCurrent = activeSessionIdRef.current === id;
+      setSessionActivity((prev) => ({
+        ...prev,
+        [id]: {
+          state,
+          unread: shouldUnread && !isCurrent,
+          updated_ms: Date.now(),
+          text,
+        },
+      }));
+    },
+    [],
+  );
+  const ackSessionActivity = useCallback((id: string | undefined) => {
+    if (!id) return;
+    setSessionActivity((prev) => {
+      const current = prev[id];
+      if (!current) return prev;
+      const nextState =
+        current.state === "done" || current.state === "unread"
+          ? "idle"
+          : current.state;
+      const next = {
+        ...current,
+        state: nextState,
+        unread: false,
+        updated_ms: Date.now(),
+      };
+      if (current.state === next.state && current.unread === next.unread) {
+        return prev;
+      }
+      return { ...prev, [id]: next };
+    });
   }, []);
   useEffect(() => {
     saveAppSettings(appSettings);
@@ -1224,6 +1465,7 @@ function App() {
     };
   }, [updateComputerUseEntry]);
   useEffect(() => {
+    if (!canUseTauriEventApi()) return;
     const pending: Promise<() => void>[] = [
       listen<{ terminal_id: string; data: string }>("terminal-output", (e) => {
         const terminalId = e.payload?.terminal_id;
@@ -1323,6 +1565,25 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sidebar.groupByProject", groupByProject ? "1" : "0");
   }, [groupByProject]);
+  useEffect(() => {
+    localStorage.setItem(
+      "sidebar.attentionOnly",
+      sidebarAttentionOnly ? "1" : "0",
+    );
+  }, [sidebarAttentionOnly]);
+  useEffect(() => {
+    localStorage.setItem(
+      "sidebar.showArchived",
+      showArchivedSessions ? "1" : "0",
+    );
+  }, [showArchivedSessions]);
+  useEffect(() => {
+    if (sessions.length === 0) return;
+    setSessionActivity((prev) => pruneSessionActivity(prev, sessions));
+  }, [sessions]);
+  useEffect(() => {
+    saveSessionActivity(sessionActivity);
+  }, [sessionActivity]);
   const [gridMode, setGridMode] = useState<boolean>(() => {
     return localStorage.getItem("gridMode") === "1";
   });
@@ -1478,19 +1739,24 @@ function App() {
   // ⌘K / Ctrl+K opens the command palette; ⌘J / Ctrl+J toggles the
   // integrated terminal panel.
   useEffect(() => {
+    if (!canUseTauriEventApi()) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    void listen("blackcrab-open-settings", () => {
-      setSettingsOpen(true);
-    })
-      .then((cleanup) => {
-        if (cancelled) {
-          cleanup();
-        } else {
-          unlisten = cleanup;
-        }
+    try {
+      void listen("blackcrab-open-settings", () => {
+        setSettingsOpen(true);
       })
-      .catch(() => {});
+        .then((cleanup) => {
+          if (cancelled) {
+            cleanup();
+          } else {
+            unlisten = cleanup;
+          }
+        })
+        .catch(() => {});
+    } catch {
+      return;
+    }
 
     return () => {
       cancelled = true;
@@ -1498,8 +1764,30 @@ function App() {
     };
   }, []);
 
+  const attentionSessions = useMemo(
+    () =>
+      sessions.filter((s) => {
+        if (!showArchivedSessions && s.archived) return false;
+        return isAttentionActivity(deriveSessionActivity(s, sessionActivity));
+      }),
+    [sessionActivity, sessions, showArchivedSessions],
+  );
+  const openNextAttentionSession = useEvent(() => {
+    if (attentionSessions.length === 0) return;
+    const currentId = activeSessionIdRef.current;
+    const currentIndex = currentId
+      ? attentionSessions.findIndex((s) => s.id === currentId)
+      : -1;
+    const next =
+      attentionSessions[(currentIndex + 1) % attentionSessions.length];
+    ackSessionActivity(next.id);
+    if (gridMode) setGridMode(false);
+    resumeSession(next.id, next.cwd);
+  });
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const editable = isEditableTarget(e.target);
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
@@ -1520,11 +1808,35 @@ function App() {
         // implement our own.
         e.preventDefault();
         setSearchOpen((v) => !v);
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === "a" || e.key === "A")
+      ) {
+        if (editable) return;
+        e.preventDefault();
+        setSidebarAttentionOnly((v) => !v);
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === "n" || e.key === "N")
+      ) {
+        if (editable) return;
+        e.preventDefault();
+        openNextAttentionSession();
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === "i" || e.key === "I")
+      ) {
+        if (editable) return;
+        e.preventDefault();
+        setDiagnosticsOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openNextAttentionSession]);
 
   // Grid-scoped keyboard shortcuts. Only fire when gridMode is on and
   // focus isn't captured by an editable (composer, title input, etc.),
@@ -1619,7 +1931,7 @@ function App() {
   // Listen for native drag-drop on the window — this is the reliable way
   // to get real file paths instead of just File blobs.
   useEffect(() => {
-    if (!isTauriRuntime()) return;
+    if (!canUseTauriEventApi()) return;
     let unlisten: (() => void) | null = null;
     let currentWebview: ReturnType<typeof getCurrentWebview>;
     try {
@@ -1627,8 +1939,9 @@ function App() {
     } catch {
       return;
     }
-    currentWebview
-      .onDragDropEvent((e) => {
+    let listenPromise: Promise<() => void>;
+    try {
+      listenPromise = currentWebview.onDragDropEvent((e) => {
         if (e.payload.type === "enter" || e.payload.type === "over") {
           setDragOver(true);
         } else if (e.payload.type === "leave") {
@@ -1671,7 +1984,11 @@ function App() {
             return [...prev, ...additions];
           });
         }
-      })
+      });
+    } catch {
+      return;
+    }
+    listenPromise
       .then((fn) => {
         unlisten = fn;
       })
@@ -1856,6 +2173,7 @@ function App() {
   });
   const requestSidebarEngagementTop = useEvent((sessionId?: string | null) => {
     if (sessionId) {
+      markSessionActivity(sessionId, "running", "working");
       requestSidebarSessionTop(sessionId);
       return;
     }
@@ -2082,6 +2400,27 @@ function App() {
         .catch(notifyErr("failed to delete session"));
     },
     [setActiveSessionId],
+  );
+
+  const archiveSession = useCallback(
+    async (id: string, sessionCwd: string, archived: boolean) => {
+      try {
+        await invoke("set_session_archived", {
+          sessionId: id,
+          cwd: sessionCwd,
+          archived,
+        });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === id ? { ...s, archived } : s)),
+        );
+        if (archived) {
+          ackSessionActivity(id);
+        }
+      } catch (e) {
+        notifyErr(archived ? "failed to archive session" : "failed to unarchive session")(e);
+      }
+    },
+    [ackSessionActivity],
   );
 
   const renameSession = useCallback(
@@ -2312,7 +2651,7 @@ function App() {
   }
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
+    if (!canUseTauriEventApi()) return;
     const pending: Promise<() => void>[] = [
       listen<{ panel_id: string; line: string }>("claude-event", (e) => {
         if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
@@ -2375,7 +2714,9 @@ function App() {
     if (any.type === "control_request") {
       const req = any.request as Record<string, unknown> | undefined;
       if (req && req.subtype === "can_use_tool") {
-        requestSidebarSessionTop(activeSessionIdRef.current);
+        const sid = activeSessionIdRef.current;
+        markSessionActivity(sid, "waiting", "permission needed");
+        requestSidebarSessionTop(sid);
         setPendingPermission({
           requestId: String(any.request_id ?? ""),
           toolName: String(req.tool_name ?? "unknown"),
@@ -2515,7 +2856,13 @@ function App() {
     }
 
     if (ev.type === "result") {
-      requestSidebarSessionTop(ev.session_id ?? activeSessionIdRef.current);
+      const sid = ev.session_id ?? activeSessionIdRef.current;
+      markSessionActivity(
+        sid,
+        ev.is_error ? "error" : "done",
+        ev.is_error ? "turn errored" : "turn complete",
+      );
+      requestSidebarSessionTop(sid);
       setBusy(false);
       streamingIdRef.current = null;
       const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
@@ -2599,7 +2946,9 @@ function App() {
     // API call itself fails. Surface them clearly.
     const evAny = ev as { type?: string; error?: unknown; message?: unknown };
     if (evAny.type === "error") {
-      requestSidebarSessionTop(activeSessionIdRef.current);
+      const sid = activeSessionIdRef.current;
+      markSessionActivity(sid, "error", "API error");
+      requestSidebarSessionTop(sid);
       setBusy(false);
       const errObj = evAny.error as { message?: string; type?: string } | string | undefined;
       const msg =
@@ -3023,6 +3372,7 @@ function App() {
       .catch((e) => {
         if (!isLatest()) return;
         setSessionOn(false);
+        markSessionActivity(sessionId, "error", "failed to start");
         setEntries((es) => [
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
@@ -3089,6 +3439,7 @@ function App() {
     try {
       await invoke("stop_session", { panelId: "main" });
     } finally {
+      if (busy) markSessionActivity(activeSessionIdRef.current, "interrupted", "stopped");
       setSessionOn(false);
       setBusy(false);
     }
@@ -3097,6 +3448,7 @@ function App() {
   async function interruptTurn() {
     try {
       await invoke("interrupt_session", { panelId: "main" });
+      markSessionActivity(activeSessionIdRef.current, "interrupted", "interrupted");
     } catch (e) {
       console.error("interrupt failed", e);
     }
@@ -3123,6 +3475,7 @@ function App() {
       });
       setSessionOn(true);
     } catch (e) {
+      markSessionActivity(activeSessionIdRef.current, "error", "reset failed");
       setEntries((es) => [
         ...es,
         { kind: "system", id: randomId(), text: `reset failed: ${e}` },
@@ -3155,6 +3508,7 @@ function App() {
         });
         setSessionOn(true);
       } catch (e) {
+        markSessionActivity(activeSessionIdRef.current, "error", "failed to start");
         setEntries((es) => [
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
@@ -3175,6 +3529,7 @@ function App() {
       await invoke("send_message", { panelId: "main", text });
     } catch (e) {
       setBusy(false);
+      markSessionActivity(activeSessionIdRef.current, "error", "send failed");
       setEntries((es) => [
         ...es,
         { kind: "system", id: randomId(), text: `send failed: ${e}` },
@@ -3214,6 +3569,7 @@ function App() {
         });
         setSessionOn(true);
       } catch (e) {
+        markSessionActivity(activeSessionIdRef.current, "error", "failed to start");
         setEntries((es) => [
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
@@ -3241,6 +3597,7 @@ function App() {
       await invoke("send_message", { panelId: "main", text: body });
     } catch (e) {
       setBusy(false);
+      markSessionActivity(activeSessionIdRef.current, "error", "send failed");
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
       notifyErr("send failed")(e);
     }
@@ -3361,6 +3718,7 @@ function App() {
   // useEvent body always sees the latest closure, but the returned ref
   // identity never changes.
   const onSidebarResume = useEvent((id: string, cwd: string) => {
+    ackSessionActivity(id);
     if (gridMode) {
       // Clicking a sidebar session in grid mode:
       //   * if it's already in the grid → focus it
@@ -3424,8 +3782,30 @@ function App() {
   const onSidebarNew = useEvent(() => {
     newSession();
   });
+  const onSidebarArchive = useEvent(
+    (id: string, sessionCwd: string, archived: boolean) => {
+      void archiveSession(id, sessionCwd, archived);
+    },
+  );
   const onGridPanelAttention = useEvent(
     (_panelId: string, sid: string, state: PanelAttentionState) => {
+      markSessionActivity(
+        sid,
+        state === "permission"
+          ? "waiting"
+          : state === "error"
+          ? "error"
+          : state === "completed"
+          ? "done"
+          : "running",
+        state === "permission"
+          ? "permission needed"
+          : state === "completed"
+          ? "turn complete"
+          : state === "error"
+          ? "turn errored"
+          : "working",
+      );
       requestSidebarSessionTop(sid);
       if (state === "completed" || state === "error") refreshSessions();
     },
@@ -3456,6 +3836,29 @@ function App() {
       ? resolvePanelSession(selectedGridPanelId, panelSessionIds)
       : undefined
     : sidebarSelectedSessionId ?? activeSessionId;
+  const activeSessionInfo = activeSessionId
+    ? sessions.find((s) => s.id === activeSessionId)
+    : undefined;
+  const transcriptSearchVersion = useMemo(() => {
+    const last = entries[entries.length - 1];
+    let tail = "";
+    if (last?.kind === "assistant") {
+      tail = last.blocks
+        .map((b) =>
+          !b
+            ? 0
+            : b.type === "text"
+            ? (b as TextBlock).text?.length ?? 0
+            : b.type === "thinking"
+            ? (b as ThinkingBlock).thinking?.length ?? 0
+            : b.type,
+        )
+        .join(",");
+    } else if (last) {
+      tail = last.id;
+    }
+    return `${activeSessionId ?? NEW_SESSION_KEY}:${entries.length}:${tail}`;
+  }, [activeSessionId, entries]);
   const shouldShowOnboarding =
     onboardingForced ||
     (!onboardingDismissed &&
@@ -3584,6 +3987,35 @@ function App() {
               },
             },
             {
+              id: "next-attention",
+              title: "Open next attention session",
+              hint: "⌘⇧N",
+              run: () => {
+                openNextAttentionSession();
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "toggle-attention-filter",
+              title: sidebarAttentionOnly
+                ? "Show all active sessions"
+                : "Show attention sessions only",
+              hint: "⌘⇧A",
+              run: () => {
+                setSidebarAttentionOnly((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
+            {
+              id: "diagnostics",
+              title: diagnosticsOpen ? "Close diagnostics" : "Open diagnostics",
+              hint: "⌘⇧I",
+              run: () => {
+                setDiagnosticsOpen((v) => !v);
+                setPaletteOpen(false);
+              },
+            },
+            {
               id: "computer-use",
               title: "Open computer use session",
               hint: "/mcp",
@@ -3603,6 +4035,25 @@ function App() {
             },
             ...(activeSessionId && entries.length > 0
               ? [
+                  ...(activeSessionInfo
+                    ? [
+                        {
+                          id: "archive-current",
+                          title: activeSessionInfo.archived
+                            ? "Unarchive this conversation"
+                            : "Archive this conversation",
+                          hint: activeSessionInfo.archived ? "restore" : "archive",
+                          run: () => {
+                            setPaletteOpen(false);
+                            void archiveSession(
+                              activeSessionInfo.id,
+                              activeSessionInfo.cwd,
+                              !activeSessionInfo.archived,
+                            );
+                          },
+                        },
+                      ]
+                    : []),
                   {
                     id: "export-md",
                     title: "Export this conversation as markdown",
@@ -3655,6 +4106,24 @@ function App() {
           onClearStartupCwd={clearStartupCwd}
         />
       )}
+      {diagnosticsOpen && (
+        <DiagnosticsPanel
+          cwd={cwd}
+          activeSessionId={activeSessionId}
+          activeSession={activeSessionInfo}
+          sessionOn={sessionOn}
+          busy={busy}
+          stuckBusy={stuckBusy}
+          gridMode={gridMode}
+          sessions={sessions}
+          attentionCount={attentionSessions.length}
+          activity={sessionActivity}
+          pendingPermission={pendingPermission}
+          pendingDenials={pendingDenials}
+          stderrLines={stderrLines}
+          onClose={() => setDiagnosticsOpen(false)}
+        />
+      )}
       {worktreePrompt && (
         <WorktreePromptModal
           cwd={worktreePrompt.cwd}
@@ -3677,11 +4146,15 @@ function App() {
         activeId={sidebarActiveId}
         featuredId={sidebarFeaturedSessionId}
         scrollTarget={sidebarScrollTarget}
+        activity={sessionActivity}
+        attentionOnly={sidebarAttentionOnly}
+        showArchived={showArchivedSessions}
         loading={sessionsLoading}
         resumingId={resumingId}
         onResume={onSidebarResume}
         onRename={renameSession}
         onDelete={deleteSession}
+        onArchive={onSidebarArchive}
         onNew={onSidebarNew}
         onRefresh={refreshSessions}
         cwd={cwd}
@@ -3691,6 +4164,8 @@ function App() {
         onSearchChange={setSessionSearch}
         grouped={groupByProject}
         onGroupedChange={setGroupByProject}
+        onAttentionOnlyChange={setSidebarAttentionOnly}
+        onShowArchivedChange={setShowArchivedSessions}
         width={sidebarResize.width}
         onResizeStart={sidebarResize.onPointerDown}
       />
@@ -3907,6 +4382,7 @@ function App() {
           {searchOpen && (
             <SearchOverlay
               scrollRef={transcriptScrollRef}
+              version={transcriptSearchVersion}
               onClose={() => setSearchOpen(false)}
             />
           )}
@@ -3995,16 +4471,19 @@ function App() {
               req={pendingPermission}
               onAllow={async () => {
                 await respondPermission("main", pendingPermission, true);
+                markSessionActivity(activeSessionIdRef.current, "running", "working");
                 setPendingPermission(null);
               }}
               onDeny={async () => {
                 await respondPermission("main", pendingPermission, false);
+                markSessionActivity(activeSessionIdRef.current, "running", "working");
                 setPendingPermission(null);
               }}
               onAllowAndBypass={async () => {
                 await respondPermission("main", pendingPermission, true);
                 await setPermissionModeOnPanel("main", "bypassPermissions");
                 setPermissionMode("bypassPermissions");
+                markSessionActivity(activeSessionIdRef.current, "running", "working");
                 setPendingPermission(null);
               }}
             />
@@ -4049,6 +4528,7 @@ function App() {
                     });
                   }
                 } catch (e) {
+                  markSessionActivity(sid, "error", "retry failed");
                   setEntries((es) => [
                     ...es,
                     {
@@ -4370,6 +4850,13 @@ function App() {
             {sessionMeta?.tools && <span className="meta">• {sessionMeta.tools.length} tools</span>}
           </div>
           <div className="status-right">
+            <button
+              className="stderr-toggle"
+              onClick={() => setDiagnosticsOpen((v) => !v)}
+              title="open diagnostics"
+            >
+              diagnostics
+            </button>
             {!previewOpen && (
               <button
                 className="stderr-toggle preview-toggle"
@@ -4721,15 +5208,13 @@ function SettingsModal({
 // Scoped to the single-mode transcript — grid mode's multiple scroll
 // regions would need per-panel wiring.
 //
-// Caveat: if the transcript re-renders while the overlay is open
-// (e.g. a streaming turn arrives), the wrapping <mark>s are thrown out
-// and the user has to re-type to re-search. This keeps the code simple
-// and avoids fighting the memoized transcript output.
 function SearchOverlay({
   scrollRef,
+  version,
   onClose,
 }: {
   scrollRef: React.RefObject<HTMLDivElement | null>;
+  version: string;
   onClose: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -4816,6 +5301,13 @@ function SearchOverlay({
   }, [query]);
 
   useEffect(() => {
+    if (!query) return;
+    const handle = window.requestAnimationFrame(() => highlight(query));
+    return () => window.cancelAnimationFrame(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
+
+  useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
@@ -4827,7 +5319,7 @@ function SearchOverlay({
     const next = (current + delta + marks.length) % marks.length;
     setCurrent(next);
     marks[next].classList.add("active");
-    marks[next].scrollIntoView({ block: "center", behavior: "auto" });
+    marks[next].scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
   return (
@@ -5264,11 +5756,15 @@ const Sidebar = memo(function Sidebar({
   activeId,
   featuredId,
   scrollTarget,
+  activity,
+  attentionOnly,
+  showArchived,
   loading,
   resumingId,
   onResume,
   onRename,
   onDelete,
+  onArchive,
   onNew,
   onRefresh,
   cwd,
@@ -5278,6 +5774,8 @@ const Sidebar = memo(function Sidebar({
   onSearchChange,
   grouped,
   onGroupedChange,
+  onAttentionOnlyChange,
+  onShowArchivedChange,
   width,
   onResizeStart,
 }: {
@@ -5285,11 +5783,15 @@ const Sidebar = memo(function Sidebar({
   activeId?: string;
   featuredId?: string;
   scrollTarget: { sessionId: string; seq: number } | null;
+  activity: SessionActivityStore;
+  attentionOnly: boolean;
+  showArchived: boolean;
   loading: boolean;
   resumingId: string | null;
   onResume: (id: string, cwd: string) => void;
   onRename: (id: string, cwd: string, title: string) => Promise<void>;
   onDelete: (id: string, cwd: string, title: string) => void;
+  onArchive: (id: string, cwd: string, archived: boolean) => void;
   onNew: () => void;
   onRefresh: () => void;
   cwd: string;
@@ -5299,6 +5801,8 @@ const Sidebar = memo(function Sidebar({
   onSearchChange: (value: string) => void;
   grouped: boolean;
   onGroupedChange: (value: boolean) => void;
+  onAttentionOnlyChange: (value: boolean) => void;
+  onShowArchivedChange: (value: boolean) => void;
   width: number;
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
@@ -5372,6 +5876,7 @@ const Sidebar = memo(function Sidebar({
   const projects = useMemo(() => {
     const counts = new Map<string, number>();
     for (const s of sessions) {
+      if (!showArchived && s.archived) continue;
       if (!s.cwd) continue;
       counts.set(s.cwd, (counts.get(s.cwd) ?? 0) + 1);
     }
@@ -5381,7 +5886,7 @@ const Sidebar = memo(function Sidebar({
         if (b.count !== a.count) return b.count - a.count;
         return a.name.localeCompare(b.name);
       });
-  }, [sessions]);
+  }, [sessions, showArchived]);
 
   // Content search runs in Rust, debounced, and augments the
   // title/basename/id filter. Maps session id -> preview snippet.
@@ -5425,7 +5930,10 @@ const Sidebar = memo(function Sidebar({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matches = sessions.filter((s) => {
+      if (!showArchived && s.archived) return false;
       if (projectFilter && s.cwd !== projectFilter) return false;
+      const activityState = deriveSessionActivity(s, activity);
+      if (attentionOnly && !isAttentionActivity(activityState)) return false;
       if (!q) return true;
       if (
         s.title.toLowerCase().includes(q) ||
@@ -5456,6 +5964,9 @@ const Sidebar = memo(function Sidebar({
     featuredId,
     grouped,
     contentHits,
+    activity,
+    attentionOnly,
+    showArchived,
   ]);
 
   useLayoutEffect(() => {
@@ -5525,6 +6036,20 @@ const Sidebar = memo(function Sidebar({
       .sort((a, b) => b.latest - a.latest);
   }, [filtered, grouped]);
 
+  const attentionCount = useMemo(
+    () =>
+      sessions.reduce((count, s) => {
+        if (!showArchived && s.archived) return count;
+        return isAttentionActivity(deriveSessionActivity(s, activity))
+          ? count + 1
+          : count;
+      }, 0),
+    [activity, sessions, showArchived],
+  );
+  const visibleSessionCount = sessions.filter(
+    (s) => showArchived || !s.archived,
+  ).length;
+
   return (
     <aside className="sidebar" style={{ width }}>
       <div
@@ -5567,7 +6092,7 @@ const Sidebar = memo(function Sidebar({
           onChange={(e) => onProjectFilterChange(e.target.value)}
           title={projectFilter || "all projects"}
         >
-          <option value="">all projects ({sessions.length})</option>
+          <option value="">all projects ({visibleSessionCount})</option>
           {projects.map((p) => (
             <option key={p.cwd} value={p.cwd}>
               {p.name} ({p.count})
@@ -5582,6 +6107,26 @@ const Sidebar = memo(function Sidebar({
           aria-pressed={grouped}
         >
           {grouped ? "☰" : "⫶"}
+        </button>
+      </div>
+      <div className="sidebar-quick-filters">
+        <button
+          type="button"
+          className={`sidebar-chip ${attentionOnly ? "active" : ""}`}
+          onClick={() => onAttentionOnlyChange(!attentionOnly)}
+          aria-pressed={attentionOnly}
+          title="show sessions that need attention"
+        >
+          attention {attentionCount > 0 ? attentionCount : ""}
+        </button>
+        <button
+          type="button"
+          className={`sidebar-chip ${showArchived ? "active" : ""}`}
+          onClick={() => onShowArchivedChange(!showArchived)}
+          aria-pressed={showArchived}
+          title={showArchived ? "hide archived sessions" : "show archived sessions"}
+        >
+          archive
         </button>
       </div>
       <div className="sessions-list" ref={listRef}>
@@ -5609,8 +6154,10 @@ const Sidebar = memo(function Sidebar({
                       onResume,
                       onRename,
                       onDelete,
+                      onArchive,
                       itemRefs,
                       grouped: true,
+                      activity,
                       contentHit: contentHits?.get(s.id),
                     }),
                   )}
@@ -5624,8 +6171,10 @@ const Sidebar = memo(function Sidebar({
                 onResume,
                 onRename,
                 onDelete,
+                onArchive,
                 itemRefs,
                 grouped: false,
+                activity,
                 contentHit: contentHits?.get(s.id),
               }),
             )}
@@ -5729,8 +6278,10 @@ function renderSessionItem(
     onResume: (id: string, cwd: string) => void;
     onRename: (id: string, cwd: string, title: string) => Promise<void>;
     onDelete: (id: string, cwd: string, title: string) => void;
+    onArchive: (id: string, cwd: string, archived: boolean) => void;
     itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
     grouped: boolean;
+    activity: SessionActivityStore;
     contentHit?: { preview: string; matchCount: number };
   },
 ) {
@@ -5743,6 +6294,9 @@ function renderSessionItem(
   const outputRatio = Math.min(1, s.output_tokens / outputBudget);
   const isActive = ctx.activeId === s.id;
   const isLoading = ctx.resumingId === s.id;
+  const activity = deriveSessionActivity(s, ctx.activity);
+  const activityLabel = sessionActivityLabel(activity);
+  const hasAttention = isAttentionActivity(activity);
   return (
     <div
       key={s.id}
@@ -5752,13 +6306,13 @@ function renderSessionItem(
         if (el) ctx.itemRefs.current.set(s.id, el);
         else ctx.itemRefs.current.delete(s.id);
       }}
-      className={`session-item ${isActive ? "active" : ""} ${isLoading ? "loading" : ""}`}
+      className={`session-item state-${activity.state} ${isActive ? "active" : ""} ${isLoading ? "loading" : ""} ${activity.unread ? "unread" : ""} ${hasAttention ? "attention" : ""} ${s.archived ? "archived" : ""}`}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         const target = e.target as HTMLElement | null;
         if (
           target?.closest(
-            ".session-delete, .editable-title, .editable-title-input",
+            ".session-delete, .session-archive, .editable-title, .editable-title-input",
           )
         ) {
           return;
@@ -5779,12 +6333,33 @@ function renderSessionItem(
       title={`${s.id}\n${s.cwd}\nmodel: ${s.model || "?"}\ncontext: ${formatTokens(s.context_tokens)} / ${formatTokens(s.context_limit)} (${(ctxRatio * 100).toFixed(0)}%)\ncost: $${s.total_cost_usd.toFixed(4)}\noutput: ${formatTokens(s.output_tokens)} tokens`}
     >
       {isLoading && <span className="session-loading-bar" />}
-      <EditableTitle
-        className="session-title"
-        value={s.title || ""}
-        placeholder="(untitled)"
-        onSave={(next) => ctx.onRename(s.id, s.cwd, next)}
-      />
+      <div className="session-row-head">
+        <EditableTitle
+          className="session-title"
+          value={s.title || ""}
+          placeholder="(untitled)"
+          onSave={(next) => ctx.onRename(s.id, s.cwd, next)}
+        />
+        {(hasAttention || s.archived) && (
+          <span className="session-status" title={activity.text || activityLabel}>
+            <span className="session-state-dot" />
+            {s.archived ? "archived" : activityLabel}
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        className="session-archive"
+        title={s.archived ? "unarchive session" : "archive session"}
+        aria-label={s.archived ? "unarchive session" : "archive session"}
+        onClick={(e) => {
+          e.stopPropagation();
+          ctx.onArchive(s.id, s.cwd, !s.archived);
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {s.archived ? "↥" : "↧"}
+      </button>
       <button
         type="button"
         className="session-delete"
@@ -7286,6 +7861,127 @@ function CommandPalette({
           <span>↵ select</span>
           <span>esc close</span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DiagnosticsPanel({
+  cwd,
+  activeSessionId,
+  activeSession,
+  sessionOn,
+  busy,
+  stuckBusy,
+  gridMode,
+  sessions,
+  attentionCount,
+  activity,
+  pendingPermission,
+  pendingDenials,
+  stderrLines,
+  onClose,
+}: {
+  cwd: string;
+  activeSessionId?: string;
+  activeSession?: SessionInfo;
+  sessionOn: boolean;
+  busy: boolean;
+  stuckBusy: boolean;
+  gridMode: boolean;
+  sessions: SessionInfo[];
+  attentionCount: number;
+  activity: SessionActivityStore;
+  pendingPermission: PermissionRequest | null;
+  pendingDenials: Array<{ tool_name: string; tool_input?: unknown }> | null;
+  stderrLines: string[];
+  onClose: () => void;
+}) {
+  const activityCounts = sessions.reduce<Record<string, number>>((acc, session) => {
+    const state = deriveSessionActivity(session, activity).state;
+    acc[state] = (acc[state] ?? 0) + 1;
+    return acc;
+  }, {});
+  const archivedCount = sessions.filter((s) => s.archived).length;
+  const latestStderr = stderrLines.slice(-8);
+  const rows: Array<[string, string]> = [
+    ["cwd", cwd || "(unset)"],
+    ["active", activeSessionId ? activeSessionId.slice(0, 8) : "(none)"],
+    ["connected", sessionOn ? "yes" : "no"],
+    ["busy", busy ? (stuckBusy ? "stuck" : "yes") : "no"],
+    ["mode", gridMode ? "grid" : "single"],
+    ["sessions", String(sessions.length)],
+    ["attention", String(attentionCount)],
+    ["archived", String(archivedCount)],
+    ["permission", pendingPermission ? pendingPermission.toolName : "none"],
+    ["denials", pendingDenials ? String(pendingDenials.length) : "0"],
+    ["stderr", String(stderrLines.length)],
+  ];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="diagnostics-overlay"
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="diagnostics-panel">
+        <header className="diagnostics-head">
+          <div>
+            <div className="diagnostics-title">Diagnostics</div>
+            <div className="diagnostics-subtitle">
+              {activeSession?.title || "No active conversation"}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="search-btn search-close"
+            onClick={onClose}
+            title="close"
+            aria-label="close diagnostics"
+          >
+            ×
+          </button>
+        </header>
+        <div className="diagnostics-grid">
+          {rows.map(([label, value]) => (
+            <div key={label} className="diagnostics-row">
+              <span>{label}</span>
+              <strong title={value}>{value}</strong>
+            </div>
+          ))}
+        </div>
+        <section className="diagnostics-section">
+          <div className="diagnostics-section-title">Activity</div>
+          <div className="diagnostics-chips">
+            {Object.entries(activityCounts).map(([state, count]) => (
+              <span key={state} className={`diagnostics-chip state-${state}`}>
+                {state}: {count}
+              </span>
+            ))}
+          </div>
+        </section>
+        <section className="diagnostics-section">
+          <div className="diagnostics-section-title">Recent stderr</div>
+          {latestStderr.length === 0 ? (
+            <div className="diagnostics-empty">no stderr captured</div>
+          ) : (
+            <pre className="diagnostics-stderr">
+              {latestStderr.join("\n")}
+            </pre>
+          )}
+        </section>
       </div>
     </div>
   );

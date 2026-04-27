@@ -343,6 +343,37 @@ body {
   color: var(--text);
 }
 
+.sidebar-quick-filters {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+.sidebar-chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.sidebar-chip:hover {
+  color: var(--text);
+  border-color: var(--accent-soft);
+}
+
+.sidebar-chip.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .sessions-list {
   flex: 1;
   overflow-y: auto;
@@ -438,13 +469,25 @@ body {
   border-color: var(--accent-soft);
 }
 
-/* Hover-revealed delete affordance. Anchored top-right, narrow so it
+.session-item.attention {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+}
+
+.session-item.unread {
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--bg));
+}
+
+.session-item.archived {
+  opacity: 0.68;
+}
+
+/* Hover-revealed row affordances. Anchored top-right, narrow so they
    doesn't push the title when visible. Click stops row propagation so
    the row's onClick (resume) doesn't fire first. */
-.session-delete {
+.session-delete,
+.session-archive {
   position: absolute;
   top: 4px;
-  right: 4px;
   width: 20px;
   height: 20px;
   display: flex;
@@ -460,14 +503,33 @@ body {
   opacity: 0;
   transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
 }
+
+.session-delete {
+  right: 4px;
+}
+
+.session-archive {
+  right: 28px;
+  font-size: 13px;
+}
+
 .session-item:hover .session-delete,
-.session-item:focus-within .session-delete {
+.session-item:focus-within .session-delete,
+.session-item:hover .session-archive,
+.session-item:focus-within .session-archive {
   opacity: 1;
 }
+
 .session-delete:hover {
   background: var(--bg-elev);
   border-color: var(--err);
   color: var(--err);
+}
+
+.session-archive:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .session-item:active {
@@ -549,6 +611,61 @@ body {
   text-overflow: ellipsis;
   font-weight: 500;
   color: var(--text);
+}
+
+.session-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 42px;
+}
+
+.session-row-head .session-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 72px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--text-faint);
+}
+
+.session-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+.session-item.state-running .session-state-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.session-item.state-waiting .session-state-dot,
+.session-item.state-unread .session-state-dot,
+.session-item.state-done .session-state-dot {
+  background: #e9c895;
+}
+
+.session-item.state-error .session-state-dot {
+  background: var(--err);
+}
+
+.session-item.state-interrupted .session-state-dot {
+  background: #d59cff;
 }
 
 .session-project {
@@ -1519,6 +1636,133 @@ body[data-resizing="true"] .terminal-resizer::after {
   font-size: 11px;
   color: var(--text-faint);
   font-family: var(--mono);
+}
+
+.diagnostics-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(3px);
+  z-index: 45;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10vh 16px 16px;
+}
+
+.diagnostics-panel {
+  width: min(720px, 94vw);
+  max-height: 78vh;
+  overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+}
+
+.diagnostics-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.diagnostics-title {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.diagnostics-subtitle {
+  margin-top: 3px;
+  max-width: 560px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+
+.diagnostics-row {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.diagnostics-row span {
+  color: var(--text-faint);
+}
+
+.diagnostics-row strong {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.diagnostics-section {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.diagnostics-section-title {
+  margin-bottom: 8px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.diagnostics-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.diagnostics-chip {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.diagnostics-empty {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.diagnostics-stderr {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .auth-error-overlay {
