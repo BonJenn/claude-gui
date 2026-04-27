@@ -13,6 +13,7 @@ import {
   type ToolUseBlock,
   type ToolResultBlock,
   type ToolMeta,
+  type PanelAttentionState,
   randomId,
   buildHistory,
   EntryView,
@@ -43,6 +44,7 @@ export function LivePanel({
   onRemove,
   onRename,
   onSessionStarted,
+  onAttention,
   onExpand,
   dragOver,
   dragging,
@@ -75,6 +77,11 @@ export function LivePanel({
   onRemove: () => void;
   onRename?: (id: string, cwd: string, title: string) => Promise<void>;
   onSessionStarted?: (panelId: string, sessionId: string) => void;
+  onAttention?: (
+    panelId: string,
+    sessionId: string,
+    state: PanelAttentionState,
+  ) => void;
   /** Double-click handler — expand this panel into the main single-view
    *  mode. Only fires once the panel has a real session id. The panelId
    *  is forwarded so the parent can stop this grid subprocess before
@@ -102,6 +109,10 @@ export function LivePanel({
   const [busy, setBusy] = useState(false);
   const [sessionOn, setSessionOn] = useState(false);
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
+  const sessionIdRef = useRef<string | undefined>(initialSessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId || initialSessionId;
+  }, [initialSessionId, sessionId]);
   const [title, setTitle] = useState<string | undefined>(initialTitle);
   useEffect(() => {
     setTitle(initialTitle);
@@ -262,6 +273,15 @@ export function LivePanel({
     });
   }, [entries, sessionId, initialSessionId, toolUseMap, sessionCache]);
 
+  const reportAttention = useCallback(
+    (state: PanelAttentionState, sessionIdOverride?: string) => {
+      const id = sessionIdOverride || sessionIdRef.current;
+      if (!id) return;
+      onAttention?.(panelId, id, state);
+    },
+    [onAttention, panelId],
+  );
+
   const handleEvent = useCallback(
     (ev: StreamEvent) => {
       // Claude asks the frontend for permission via control_request /
@@ -277,11 +297,13 @@ export function LivePanel({
             input: req.input,
           });
           setAttention("permission");
+          reportAttention("permission");
         }
         return;
       }
       if (ev.type === "system" && ev.subtype === "init") {
         if (ev.session_id) {
+          sessionIdRef.current = ev.session_id;
           setSessionId(ev.session_id);
           if (!notifiedStartRef.current && onSessionStarted) {
             notifiedStartRef.current = true;
@@ -464,6 +486,7 @@ export function LivePanel({
         setAttention((prev) =>
           ev.is_error ? "error" : prev === "error" ? prev : "completed",
         );
+        reportAttention(ev.is_error ? "error" : "completed", ev.session_id);
         return;
       }
 
@@ -471,10 +494,11 @@ export function LivePanel({
       const evAny = ev as { type?: string };
       if (evAny.type === "error") {
         setAttention("error");
+        reportAttention("error");
         return;
       }
     },
-    [toolUseMap, repo, panelId],
+    [toolUseMap, repo, panelId, reportAttention],
   );
 
   // Boot the subprocess exactly once on mount.
@@ -571,6 +595,7 @@ export function LivePanel({
     setAttachments([]);
     setEntries((es) => [...es, { kind: "user", id: randomId(), text: body }]);
     lastUserMessageRef.current = body;
+    reportAttention("engaged");
     setBusy(true);
     try {
       await invoke("send_message", { panelId, text: body });
@@ -582,7 +607,7 @@ export function LivePanel({
       ]);
       notifyErr("send failed")(e);
     }
-  }, [input, busy, panelId, attachments]);
+  }, [input, busy, panelId, attachments, reportAttention]);
 
   // Fire a short user reply without touching input/attachments — used
   // by the yes/no quick-reply buttons.
@@ -591,6 +616,7 @@ export function LivePanel({
       if (busy || !text) return;
       setEntries((es) => [...es, { kind: "user", id: randomId(), text }]);
       lastUserMessageRef.current = text;
+      reportAttention("engaged");
       setBusy(true);
       try {
         await invoke("send_message", { panelId, text });
@@ -603,7 +629,7 @@ export function LivePanel({
         notifyErr("send failed")(e);
       }
     },
-    [busy, panelId],
+    [busy, panelId, reportAttention],
   );
 
   // Restart this panel's subprocess in bypassPermissions mode and replay
@@ -626,6 +652,7 @@ export function LivePanel({
           ...es,
           { kind: "user", id: randomId(), text: resendText },
         ]);
+        reportAttention("engaged");
         setBusy(true);
         await invoke("send_message", { panelId, text: resendText });
       }
@@ -636,7 +663,7 @@ export function LivePanel({
       ]);
       notifyErr("retry failed")(e);
     }
-  }, [panelId, initialCwd, initialModel, sessionId, initialSessionId]);
+  }, [panelId, initialCwd, initialModel, sessionId, initialSessionId, reportAttention]);
 
   const interrupt = useCallback(() => {
     invoke("interrupt_session", { panelId }).catch((err) =>
