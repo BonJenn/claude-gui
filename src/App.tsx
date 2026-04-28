@@ -1715,59 +1715,90 @@ function App() {
     }
   }, [gridMode, gridPanels, selectedGridPanelId]);
 
-  // On entering grid mode with nothing pinned, drop the current
-  // single-mode session into slot 0 so the conversation doesn't
-  // disappear behind an empty-grid hint. Only fires on the off→on
-  // transition — if the user removes the last panel later we honor
-  // their intent and leave the grid empty.
-  //
-  // Hand off ownership: stop the "main" subprocess and clear the
-  // single-mode session state before seeding. Otherwise the grid
-  // LivePanel's start_session would be rejected by the single-writer
-  // gate (main still holds this sid). The user trades "seamless return
-  // to single-mode" for "no divergent JSONL appends" — any return from
-  // grid leaves them in an empty single-mode they can re-populate from
-  // the sidebar.
-  const prevGridModeRef = useRef(gridMode);
-  // When the user toggles into grid mode while a turn is in flight,
-  // we defer the subprocess handoff until busy=false. Killing the
-  // running claude mid-turn (the original behavior) made it look
-  // like grid mode "paused" the conversation, since --resume can't
-  // pick up an in-flight tool call.
-  const pendingGridHandoffRef = useRef(false);
-  const doGridHandoff = useEvent((sid: string) => {
-    invoke("stop_session", { panelId: "main" }).catch(() => {});
-    setSessionOn(false);
-    setActiveSessionId(undefined);
-    setGridPanels([sid]);
-    setSelectedGridPanelId(sid);
+  // Single mode uses backend panel id "main"; grid tiles use their own
+  // panel ids. Before mounting a grid tile for the active single-mode
+  // session, pause that tile and stop "main" so the backend single-writer
+  // gate never sees two owners for the same JSONL.
+  const [gridHandoffSessionId, setGridHandoffSessionId] =
+    useState<string | null>(null);
+  const leaveGridMode = useEvent(() => {
+    setGridHandoffSessionId(null);
+    setGridMode(false);
+  });
+  const enterGridMode = useEvent(() => {
+    const sid = activeSessionIdRef.current;
+    if (sid) {
+      setGridHandoffSessionId(sessionOn ? sid : null);
+      if (!gridPanels.includes(sid)) {
+        let replacedId: string | null = null;
+        let nextPanels: string[];
+        if (gridPanels.length < 6) {
+          nextPanels = [...gridPanels, sid];
+        } else {
+          replacedId =
+            selectedGridPanelId && gridPanels.includes(selectedGridPanelId)
+              ? selectedGridPanelId
+              : gridPanels[gridPanels.length - 1] ?? null;
+          nextPanels = gridPanels.map((id) =>
+            id === replacedId ? sid : id,
+          );
+        }
+        setGridPanels(nextPanels);
+        if (replacedId?.startsWith("new:")) {
+          setNewPanelCwds((m) => {
+            if (!(replacedId in m)) return m;
+            const next = { ...m };
+            delete next[replacedId];
+            return next;
+          });
+          setNewPanelWorktree((m) => {
+            if (!(replacedId in m)) return m;
+            const next = { ...m };
+            delete next[replacedId];
+            return next;
+          });
+        }
+      }
+      setSelectedGridPanelId(sid);
+    }
+    setGridMode(true);
+  });
+  const toggleGridMode = useEvent(() => {
+    if (gridMode) leaveGridMode();
+    else enterGridMode();
   });
   useEffect(() => {
-    const entering = gridMode && !prevGridModeRef.current;
-    prevGridModeRef.current = gridMode;
-    if (entering && gridPanels.length === 0 && activeSessionId) {
-      if (busy) {
-        // Turn in flight — leave the subprocess running and
-        // activeSessionId set so its events keep landing in the
-        // kept-alive transcript. The deferred-handoff effect below
-        // fires when busy goes false.
-        pendingGridHandoffRef.current = true;
-      } else {
-        doGridHandoff(activeSessionId);
-      }
-    } else if (!gridMode) {
-      // User flipped back to single before the deferred handoff
-      // could fire — abandon the pending intent.
-      pendingGridHandoffRef.current = false;
+    if (!gridMode) {
+      setGridHandoffSessionId(null);
+      return;
     }
-  }, [gridMode, gridPanels.length, activeSessionId, busy, doGridHandoff]);
-  useEffect(() => {
-    if (busy || !pendingGridHandoffRef.current) return;
-    pendingGridHandoffRef.current = false;
-    if (gridMode && gridPanels.length === 0 && activeSessionId) {
-      doGridHandoff(activeSessionId);
+    const sid = gridHandoffSessionId;
+    if (!sid) return;
+    if (activeSessionId !== sid || !sessionOn) {
+      setGridHandoffSessionId(null);
+      return;
     }
-  }, [busy, gridMode, gridPanels.length, activeSessionId, doGridHandoff]);
+    if (busy) return;
+
+    let cancelled = false;
+    (async () => {
+      await invoke("stop_session", { panelId: "main" }).catch(() => {});
+      if (cancelled) return;
+      setSessionOn(false);
+      setActiveSessionId(undefined);
+      setGridHandoffSessionId((current) => (current === sid ? null : current));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    gridMode,
+    gridHandoffSessionId,
+    activeSessionId,
+    sessionOn,
+    busy,
+    setActiveSessionId,
+  ]);
 
   // In grid mode, the topbar mirrors whichever panel is currently selected
   // so cwd/branch/model/permissions stay in sync with what the user is
@@ -1842,7 +1873,7 @@ function App() {
     const next =
       attentionSessions[(currentIndex + 1) % attentionSessions.length];
     ackSessionActivity(next.id);
-    if (gridMode) setGridMode(false);
+    if (gridMode) leaveGridMode();
     resumeSession(next.id, next.cwd);
   });
 
@@ -4062,7 +4093,7 @@ function App() {
           onClose={() => setPaletteOpen(false)}
           onPickSession={(id, sessionCwd) => {
             setPaletteOpen(false);
-            if (gridMode) setGridMode(false);
+            if (gridMode) leaveGridMode();
             resumeSession(id, sessionCwd);
           }}
           commands={[
@@ -4071,7 +4102,7 @@ function App() {
               title: gridMode ? "Leave grid mode" : "Enter grid mode",
               hint: "⊞ grid",
               run: () => {
-                setGridMode((v) => !v);
+                toggleGridMode();
                 setPaletteOpen(false);
               },
             },
@@ -4474,7 +4505,7 @@ function App() {
             <button
               type="button"
               className={`btn btn-secondary grid-mode-toggle ${gridMode ? "active" : ""}`}
-              onClick={() => setGridMode((v) => !v)}
+              onClick={toggleGridMode}
               title="grid mode (show up to 6 conversations)"
             >
               ⊞ grid
@@ -4491,6 +4522,7 @@ function App() {
             defaultCwd={cwd}
             defaultModel={model}
             selectedId={selectedGridPanelId}
+            suspendedSessionId={gridHandoffSessionId}
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
             onRename={renameSession}
@@ -4513,7 +4545,7 @@ function App() {
               try {
                 await invoke("stop_session", { panelId });
               } catch {}
-              setGridMode(false);
+              leaveGridMode();
               resumeSession(sid, panelCwd);
             }}
             onRemove={(id) => {
@@ -7455,6 +7487,7 @@ function LiveGrid({
   defaultCwd,
   defaultModel,
   selectedId,
+  suspendedSessionId,
   newPanelCwds,
   newPanelWorktree,
   onAddPanel,
@@ -7476,6 +7509,7 @@ function LiveGrid({
   defaultCwd: string;
   defaultModel: string;
   selectedId: string | null;
+  suspendedSessionId?: string | null;
   newPanelCwds: Record<string, string>;
   newPanelWorktree: Record<string, boolean>;
   onAddPanel: () => void;
@@ -7705,6 +7739,19 @@ function LiveGrid({
         }}
       >
       {panels.map((id) => {
+        if (id === suspendedSessionId) {
+          return (
+            <div
+              key={id}
+              className="grid-panel loading-skeleton"
+              onMouseDown={() => onSelect(id)}
+            >
+              <span className="grid-panel-loading">
+                finishing current turn before opening panel…
+              </span>
+            </div>
+          );
+        }
         const info = sessions.find((s) => s.id === id);
         const isNewPanel = id in newPanelCwds;
         // Pinned panel whose session info hasn't hydrated yet — wait
