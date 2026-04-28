@@ -1902,6 +1902,39 @@ body[data-resizing="true"] .terminal-resizer::after {
   font-size: 13px;
 }
 
+.token-setup {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.token-setup label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.token-setup-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.token-setup-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+}
+
+.token-setup .onboarding-note {
+  margin: 0;
+  font-size: 12px;
+}
+
 .onboarding-error {
   margin: 10px 0 0;
   padding: 8px;

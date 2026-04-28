@@ -182,6 +182,16 @@ type ClaudePreflight = {
   auth_method: string;
   api_provider: string;
   error: string;
+  managed_token_configured: boolean;
+  token_source: string;
+  auth_env_conflict: boolean;
+};
+
+type ClaudeTokenStatus = {
+  configured: boolean;
+  source: string;
+  storage_supported: boolean;
+  error: string;
 };
 
 type AppTheme = "light" | "dark" | "jet";
@@ -1200,6 +1210,8 @@ function App() {
   const [claudePreflight, setClaudePreflight] =
     useState<ClaudePreflight | null>(null);
   const [claudePreflightLoading, setClaudePreflightLoading] = useState(true);
+  const [claudeTokenSaving, setClaudeTokenSaving] = useState(false);
+  const [claudeTokenError, setClaudeTokenError] = useState("");
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   const [onboardingForced, setOnboardingForced] = useState(false);
   const [availableUpdate, setAvailableUpdate] =
@@ -2290,6 +2302,9 @@ function App() {
         auth_method: "",
         api_provider: "",
         error: "",
+        managed_token_configured: false,
+        token_source: "none",
+        auth_env_conflict: false,
       });
       setClaudePreflightLoading(false);
       return;
@@ -2308,6 +2323,9 @@ function App() {
         path: "",
         auth_method: "",
         api_provider: "",
+        managed_token_configured: false,
+        token_source: "none",
+        auth_env_conflict: false,
         error:
           typeof e === "string"
             ? e
@@ -2319,6 +2337,66 @@ function App() {
       setClaudePreflightLoading(false);
     }
   }, []);
+
+  const saveClaudeToken = useCallback(
+    async (token: string): Promise<boolean> => {
+      const trimmed = token.trim();
+      if (!trimmed) {
+        setClaudeTokenError("Paste the token printed by `claude setup-token`.");
+        return false;
+      }
+      if (!isTauriRuntime()) {
+        setClaudeTokenError("Token storage is only available in the desktop app.");
+        return false;
+      }
+
+      setClaudeTokenSaving(true);
+      setClaudeTokenError("");
+      try {
+        await invoke<ClaudeTokenStatus>("save_claude_oauth_token", {
+          token: trimmed,
+        });
+        notify("Claude token saved", "success");
+        setOnboardingDismissed(false);
+        await refreshClaudePreflight();
+        return true;
+      } catch (e) {
+        setClaudeTokenError(
+          typeof e === "string"
+            ? e
+            : e instanceof Error
+              ? e.message
+              : String(e),
+        );
+        return false;
+      } finally {
+        setClaudeTokenSaving(false);
+      }
+    },
+    [refreshClaudePreflight],
+  );
+
+  const clearClaudeToken = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+
+    setClaudeTokenSaving(true);
+    setClaudeTokenError("");
+    try {
+      await invoke<ClaudeTokenStatus>("clear_claude_oauth_token");
+      notify("Claude token removed", "success");
+      await refreshClaudePreflight();
+    } catch (e) {
+      setClaudeTokenError(
+        typeof e === "string"
+          ? e
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+    } finally {
+      setClaudeTokenSaving(false);
+    }
+  }, [refreshClaudePreflight]);
 
   useEffect(() => {
     void refreshClaudePreflight();
@@ -3940,18 +4018,28 @@ function App() {
         />
       )}
       {shouldShowOnboarding && (
-          <ClaudeOnboardingOverlay
-            status={claudePreflight}
-            loading={claudePreflightLoading}
-            onRecheck={refreshClaudePreflight}
-            onContinue={() => {
-              setOnboardingDismissed(true);
-              setOnboardingForced(false);
-            }}
-          />
-        )}
+        <ClaudeOnboardingOverlay
+          status={claudePreflight}
+          loading={claudePreflightLoading}
+          tokenSaving={claudeTokenSaving}
+          tokenError={claudeTokenError}
+          onRecheck={refreshClaudePreflight}
+          onSaveToken={saveClaudeToken}
+          onClearToken={clearClaudeToken}
+          onContinue={() => {
+            setOnboardingDismissed(true);
+            setOnboardingForced(false);
+          }}
+        />
+      )}
       {authErrorSeen && (
         <AuthErrorModal
+          onReconnect={() => {
+            setAuthErrorSeen(false);
+            setOnboardingDismissed(false);
+            setOnboardingForced(true);
+            void refreshClaudePreflight();
+          }}
           onDismiss={() => setAuthErrorSeen(false)}
           onQuit={() => {
             if (!isTauriRuntime()) {
@@ -4164,6 +4252,13 @@ function App() {
           onPickStartupCwd={pickStartupCwd}
           onUseCurrentCwd={useCurrentCwdForStartup}
           onClearStartupCwd={clearStartupCwd}
+          onOpenClaudeSetup={() => {
+            setSettingsOpen(false);
+            setAuthErrorSeen(false);
+            setOnboardingDismissed(false);
+            setOnboardingForced(true);
+            void refreshClaudePreflight();
+          }}
         />
       )}
       {diagnosticsOpen && (
@@ -5045,6 +5140,7 @@ function SettingsModal({
   onPickStartupCwd,
   onUseCurrentCwd,
   onClearStartupCwd,
+  onOpenClaudeSetup,
 }: {
   settings: AppSettings;
   theme: AppTheme;
@@ -5056,6 +5152,7 @@ function SettingsModal({
   onPickStartupCwd: () => void;
   onUseCurrentCwd: () => void;
   onClearStartupCwd: () => void;
+  onOpenClaudeSetup: () => void;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5219,6 +5316,22 @@ function SettingsModal({
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h3>Claude</h3>
+            <div className="settings-row">
+              <span className="settings-label">Authentication</span>
+              <div className="settings-control">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onOpenClaudeSetup}
+                >
+                  Open setup
+                </button>
               </div>
             </div>
           </section>
@@ -8097,18 +8210,36 @@ function WorktreePromptModal({
 function ClaudeOnboardingOverlay({
   status,
   loading,
+  tokenSaving,
+  tokenError,
   onRecheck,
+  onSaveToken,
+  onClearToken,
   onContinue,
 }: {
   status: ClaudePreflight | null;
   loading: boolean;
+  tokenSaving: boolean;
+  tokenError: string;
   onRecheck: () => void;
+  onSaveToken: (token: string) => Promise<boolean>;
+  onClearToken: () => void;
   onContinue: () => void;
 }) {
   const installCommand = "npm install -g @anthropic-ai/claude-code";
-  const loginCommand = "claude auth login --claudeai";
+  const loginCommand = "claude";
+  const setupTokenCommand = "claude setup-token";
+  const [tokenDraft, setTokenDraft] = useState("");
   const isInstalled = !!status?.installed;
   const isAuthenticated = !!status?.authenticated;
+  const hasManagedToken = !!status?.managed_token_configured;
+  const hasStoredToken = status?.token_source === "keychain";
+  const authLabel =
+    hasManagedToken && status?.token_source === "keychain"
+      ? "Blackcrab token (keychain)"
+      : hasManagedToken && status?.token_source === "environment"
+        ? "Claude OAuth token (environment)"
+        : `${status?.auth_method || "signed in"}${status?.api_provider ? ` (${status.api_provider})` : ""}`;
   const title = loading
     ? "Checking Claude Code"
     : !isInstalled
@@ -8127,8 +8258,10 @@ function ClaudeOnboardingOverlay({
         <div className="onboarding-kicker">Blackcrab setup</div>
         <h2>{title}</h2>
         <p>
-          Blackcrab uses your local Claude Code install and account. It never
-          asks for, stores, or proxies Anthropic credentials.
+          Blackcrab runs the local Claude Code CLI in non-interactive mode. If
+          normal CLI login is unreliable, Blackcrab can store a long-lived
+          Claude Code token in macOS Keychain and pass it only to spawned
+          Claude subprocesses.
         </p>
         <div className="onboarding-status-list">
           <div className={`onboarding-status ${isInstalled ? "ok" : loading ? "" : "bad"}`}>
@@ -8152,32 +8285,76 @@ function ClaudeOnboardingOverlay({
                 {loading
                   ? "checking..."
                   : isAuthenticated
-                    ? `${status?.auth_method || "signed in"}${status?.api_provider ? ` (${status.api_provider})` : ""}`
+                    ? authLabel
                     : "not signed in"}
               </span>
             </div>
           </div>
         </div>
+        {!loading && status?.auth_env_conflict && !hasManagedToken && (
+          <p className="onboarding-note">
+            An Anthropic API auth environment variable is present. It can take
+            precedence over Claude subscription auth and cause 401 errors if it
+            is stale.
+          </p>
+        )}
         {!loading && !isInstalled && (
           <>
             <p>Install Claude Code, then sign in with Claude.ai Pro/Max or Anthropic Console billing.</p>
             <CommandCopyRow command={installCommand} onCopy={copyCommand} />
-            <CommandCopyRow command={loginCommand} onCopy={copyCommand} />
+            <CommandCopyRow command={setupTokenCommand} onCopy={copyCommand} />
           </>
         )}
         {!loading && isInstalled && !isAuthenticated && (
           <>
-            <p>Run the login command in a terminal, complete the browser flow, then recheck.</p>
+            <p>
+              First try normal Claude Code login in a terminal. Run{" "}
+              <code>claude</code>, use <code>/login</code>, then recheck.
+            </p>
             <CommandCopyRow command={loginCommand} onCopy={copyCommand} />
             <p className="onboarding-note">
-              API billing users can run <code>claude auth login --console</code> instead.
+              If Blackcrab still cannot authenticate, create a long-lived
+              token and paste it here. This is the recommended reliability path
+              for packaged app launches.
             </p>
+            <CommandCopyRow command={setupTokenCommand} onCopy={copyCommand} />
+            <TokenSetupForm
+              value={tokenDraft}
+              saving={tokenSaving}
+              error={tokenError}
+              onChange={setTokenDraft}
+              onSave={() => {
+                void onSaveToken(tokenDraft).then((saved) => {
+                  if (saved) setTokenDraft("");
+                });
+              }}
+            />
+          </>
+        )}
+        {!loading && isInstalled && isAuthenticated && hasManagedToken && (
+          <>
+            <p className="onboarding-note">
+              {hasStoredToken
+                ? "Blackcrab will use its stored token for Claude sessions and ignore stale Anthropic API-key variables for spawned Claude processes."
+                : "Blackcrab will use the Claude OAuth token from the environment and ignore stale Anthropic API-key variables for spawned Claude processes."}
+            </p>
+            {tokenError && <pre className="onboarding-error">{tokenError}</pre>}
           </>
         )}
         {!loading && status?.error && (
           <pre className="onboarding-error">{status.error}</pre>
         )}
         <div className="auth-error-actions">
+          {hasStoredToken && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={onClearToken}
+              disabled={tokenSaving}
+            >
+              Forget token
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-secondary"
@@ -8195,6 +8372,50 @@ function ClaudeOnboardingOverlay({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TokenSetupForm({
+  value,
+  saving,
+  error,
+  onChange,
+  onSave,
+}: {
+  value: string;
+  saving: boolean;
+  error: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="token-setup">
+      <label htmlFor="claude-token-input">Claude Code OAuth token</label>
+      <div className="token-setup-row">
+        <input
+          id="claude-token-input"
+          type="password"
+          value={value}
+          placeholder="sk-ant-oat..."
+          onChange={(e) => onChange(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onSave}
+          disabled={saving || !value.trim()}
+        >
+          {saving ? "Saving..." : "Save token"}
+        </button>
+      </div>
+      <p className="onboarding-note">
+        The token is stored in macOS Keychain and passed only to Claude
+        subprocesses. Blackcrab does not write it to shell profiles.
+      </p>
+      {error && <pre className="onboarding-error">{error}</pre>}
     </div>
   );
 }
@@ -8221,9 +8442,11 @@ function CommandCopyRow({
 }
 
 function AuthErrorModal({
+  onReconnect,
   onDismiss,
   onQuit,
 }: {
+  onReconnect: () => void;
   onDismiss: () => void;
   onQuit: () => void;
 }) {
@@ -8233,24 +8456,30 @@ function AuthErrorModal({
         <h2>Claude needs you to sign in again</h2>
         <p>
           The <code>claude</code> CLI got a <strong>401 Invalid authentication
-          credentials</strong> response. That usually means the OAuth token
-          tied to your Max subscription has expired and needs a fresh login.
+          credentials</strong> response. That usually means the CLI credential
+          available to Blackcrab is missing, expired, or being shadowed by a
+          stale API-key environment variable.
         </p>
-        <p>To fix:</p>
+        <p>
+          Reconnect Claude to open the setup flow. The most reliable option for
+          packaged app launches is to run <code>claude setup-token</code> once
+          and save that token in Blackcrab.
+        </p>
         <ol>
           <li>
-            Open a terminal and run <code>claude login</code>, then complete
-            the browser flow.
+            Try normal CLI login with <code>claude</code> and <code>/login</code>.
           </li>
           <li>
-            Quit and relaunch this app — the CLI only reads its credential
-            file at startup, so an in-flight subprocess won't pick up the
-            refresh.
+            If that still fails, use <code>claude setup-token</code> and paste
+            the token into Blackcrab so it can be stored in macOS Keychain.
           </li>
         </ol>
         <div className="auth-error-actions">
           <button type="button" className="btn btn-secondary" onClick={onDismiss}>
             Dismiss
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onReconnect}>
+            Reconnect Claude
           </button>
           <button type="button" className="btn btn-primary" onClick={onQuit}>
             Quit app
