@@ -3386,6 +3386,12 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
+    if (activeSessionIdRef.current === sessionId && sessionOn) {
+      ackSessionActivity(sessionId);
+      setSidebarSelectedSessionId(sessionId);
+      return;
+    }
+
     const token = ++resumeTokenRef.current;
     const isLatest = () => resumeTokenRef.current === token;
     const t0 = performance.now();
@@ -6498,6 +6504,7 @@ function renderSessionItem(
         if (e.detail === 0) ctx.onResume(s.id, s.cwd);
       }}
       onKeyDown={(e) => {
+        if (isEditableTarget(e.target)) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           ctx.onResume(s.id, s.cwd);
