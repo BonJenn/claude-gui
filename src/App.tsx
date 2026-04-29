@@ -1702,8 +1702,28 @@ function App() {
   // this, the topbar sync below can't find the session info for freshly
   // started panels because their panel key never matches a session id.
   const [panelSessionIds, setPanelSessionIds] = useState<Record<string, string>>(
-    {},
+    () => {
+      const raw = localStorage.getItem("gridPanelSessionIds");
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object") return {};
+        const out: Record<string, string> = {};
+        for (const [panelId, sessionId] of Object.entries(parsed)) {
+          if (typeof sessionId === "string") out[panelId] = sessionId;
+        }
+        return out;
+      } catch {
+        return {};
+      }
+    },
   );
+  useEffect(() => {
+    localStorage.setItem(
+      "gridPanelSessionIds",
+      JSON.stringify(panelSessionIds),
+    );
+  }, [panelSessionIds]);
   useEffect(() => {
     if (!gridMode) return;
     if (gridPanels.length === 0) {
@@ -2582,7 +2602,22 @@ function App() {
             setActiveSessionId(undefined);
             setSessionOn(false);
           }
-          setGridPanels((prev) => prev.filter((p) => p !== id));
+          setGridPanels((prev) =>
+            prev.filter(
+              (p) => p !== id && resolvePanelSession(p, panelSessionIds) !== id,
+            ),
+          );
+          setPanelSessionIds((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            for (const [panelId, sid] of Object.entries(next)) {
+              if (sid === id) {
+                delete next[panelId];
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           const d = loadDrafts();
           if (id in d) {
             delete d[id];
@@ -2591,7 +2626,7 @@ function App() {
         })
         .catch(notifyErr("failed to delete session"));
     },
-    [setActiveSessionId],
+    [panelSessionIds, setActiveSessionId],
   );
 
   const archiveSession = useCallback(
@@ -2724,11 +2759,9 @@ function App() {
     const toDrop: string[] = [];
     const stillUnknown = new Map<string, number>();
     for (const id of gridPanels) {
-      if (id in newPanelCwds) {
-        misses.delete(id);
-        continue;
-      }
-      if (hydrated.has(id)) {
+      const resolvedId = resolvePanelSession(id, panelSessionIds) ?? id;
+      const pendingNewPanel = id in newPanelCwds && !(id in panelSessionIds);
+      if (pendingNewPanel || hydrated.has(resolvedId)) {
         misses.delete(id);
         continue;
       }
@@ -2757,7 +2790,7 @@ function App() {
     setSelectedGridPanelId((cur) =>
       cur && toDrop.includes(cur) ? null : cur,
     );
-  }, [sessions, sessionsLoading, gridPanels, newPanelCwds]);
+  }, [sessions, sessionsLoading, gridPanels, newPanelCwds, panelSessionIds]);
 
   useEffect(() => {
     refreshBranches(cwd);
@@ -3416,6 +3449,12 @@ function App() {
           delete next[replacedId];
           return next;
         });
+        setPanelSessionIds((m) => {
+          if (!(replacedId in m)) return m;
+          const next = { ...m };
+          delete next[replacedId];
+          return next;
+        });
       }
     } else {
       setGridPanels((prev) => [...prev, key]);
@@ -3970,6 +4009,12 @@ function App() {
           return next;
         });
         setNewPanelWorktree((m) => {
+          if (!(targetId in m)) return m;
+          const next = { ...m };
+          delete next[targetId];
+          return next;
+        });
+        setPanelSessionIds((m) => {
           if (!(targetId in m)) return m;
           const next = { ...m };
           delete next[targetId];
@@ -7815,7 +7860,7 @@ function LiveGrid({
             initialSessionId={isPendingNewPanel ? undefined : sessionId}
             initialCwd={panelCwd}
             initialModel={panelModel}
-            initialTitle={isPendingNewPanel ? "new session" : info?.title}
+            initialTitle={info?.title}
             initialMtime={isPendingNewPanel ? 0 : info?.mtime_ms ?? 0}
             permissionMode={info?.permission_mode || permissionMode}
             repo=""
