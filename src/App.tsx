@@ -1240,6 +1240,7 @@ function App() {
     () => localStorage.getItem("sidebar.showArchived") === "1",
   );
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [activeSessionId, _setActiveSessionIdState] =
     useState<string | undefined>();
   const [sidebarSelectedSessionId, setSidebarSelectedSessionId] =
@@ -2578,6 +2579,11 @@ function App() {
       setSessionsLoading(false);
     }
   }, []);
+
+  const openUsageDashboard = useCallback(() => {
+    setUsageOpen(true);
+    void refreshSessions();
+  }, [refreshSessions]);
 
   const reorderGridPanels = useCallback((fromId: string, toId: string) => {
     if (fromId === toId) return;
@@ -4279,6 +4285,19 @@ function App() {
               },
             },
             {
+              id: "usage-dashboard",
+              title: usageOpen ? "Close usage dashboard" : "Open usage dashboard",
+              hint: "usage",
+              run: () => {
+                if (usageOpen) {
+                  setUsageOpen(false);
+                } else {
+                  openUsageDashboard();
+                }
+                setPaletteOpen(false);
+              },
+            },
+            {
               id: "computer-use",
               title: "Open computer use session",
               hint: "/mcp",
@@ -4367,6 +4386,10 @@ function App() {
           onPickStartupCwd={pickStartupCwd}
           onUseCurrentCwd={useCurrentCwdForStartup}
           onClearStartupCwd={clearStartupCwd}
+          onOpenUsage={() => {
+            setSettingsOpen(false);
+            openUsageDashboard();
+          }}
           onOpenClaudeSetup={() => {
             setSettingsOpen(false);
             setAuthErrorSeen(false);
@@ -4392,6 +4415,13 @@ function App() {
           pendingDenials={pendingDenials}
           stderrLines={stderrLines}
           onClose={() => setDiagnosticsOpen(false)}
+        />
+      )}
+      {usageOpen && (
+        <UsageDashboard
+          sessions={sessions}
+          onRefresh={refreshSessions}
+          onClose={() => setUsageOpen(false)}
         />
       )}
       {worktreePrompt && (
@@ -4579,6 +4609,14 @@ function App() {
               title="toggle integrated terminal (⌘J)"
             >
               &gt;_ terminal
+            </button>
+            <button
+              type="button"
+              className={`btn btn-secondary grid-mode-toggle ${usageOpen ? "active" : ""}`}
+              onClick={openUsageDashboard}
+              title="usage dashboard"
+            >
+              usage
             </button>
             <button
               type="button"
@@ -5248,6 +5286,7 @@ function SettingsModal({
   onPickStartupCwd,
   onUseCurrentCwd,
   onClearStartupCwd,
+  onOpenUsage,
   onOpenClaudeSetup,
 }: {
   settings: AppSettings;
@@ -5260,6 +5299,7 @@ function SettingsModal({
   onPickStartupCwd: () => void;
   onUseCurrentCwd: () => void;
   onClearStartupCwd: () => void;
+  onOpenUsage: () => void;
   onOpenClaudeSetup: () => void;
 }) {
   useEffect(() => {
@@ -5445,6 +5485,22 @@ function SettingsModal({
           </section>
 
           <section className="settings-section">
+            <h3>Usage</h3>
+            <div className="settings-row">
+              <span className="settings-label">Analytics</span>
+              <div className="settings-control">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onOpenUsage}
+                >
+                  Open dashboard
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
             <h3>Behavior</h3>
             <label className="settings-check-row">
               <input
@@ -5479,6 +5535,638 @@ function SettingsModal({
           </section>
         </div>
       </div>
+    </div>
+  );
+}
+
+type UsageRange = "7d" | "30d" | "90d" | "all";
+type UsageMetric = "tokens" | "cost";
+
+type UsageRollup = {
+  key: string;
+  label: string;
+  sessions: number;
+  contextTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cost: number;
+};
+
+type UsageSessionRow = {
+  id: string;
+  title: string;
+  cwd: string;
+  project: string;
+  model: string;
+  updatedAt: string;
+  updatedMs: number;
+  messageCount: number;
+  contextTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  archived: boolean;
+};
+
+type UsageReport = {
+  generatedAt: string;
+  range: UsageRange;
+  includeArchived: boolean;
+  totals: UsageRollup;
+  buckets: UsageRollup[];
+  projects: UsageRollup[];
+  models: UsageRollup[];
+  sessions: UsageSessionRow[];
+};
+
+const USAGE_RANGE_OPTIONS: Array<{ value: UsageRange; label: string }> = [
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "90d", label: "90 days" },
+  { value: "all", label: "All" },
+];
+
+function dateKey(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function shortDateLabel(key: string): string {
+  const d = new Date(`${key}T00:00:00`);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatDateTime(ms: number): string {
+  if (!ms) return "";
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatUsd(value: number): string {
+  if (!Number.isFinite(value)) return "$0.0000";
+  if (value >= 1000) {
+    return `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function addUsage(
+  map: Map<string, UsageRollup>,
+  key: string,
+  label: string,
+  row: UsageSessionRow,
+) {
+  const current =
+    map.get(key) ?? {
+      key,
+      label,
+      sessions: 0,
+      contextTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cost: 0,
+    };
+  current.sessions += 1;
+  current.contextTokens += row.contextTokens;
+  current.outputTokens += row.outputTokens;
+  current.totalTokens += row.totalTokens;
+  current.cost += row.estimatedCostUsd;
+  map.set(key, current);
+}
+
+function buildUsageReport(
+  sessions: SessionInfo[],
+  range: UsageRange,
+  includeArchived: boolean,
+): UsageReport {
+  const now = Date.now();
+  const days =
+    range === "7d" ? 7 : range === "30d" ? 30 : range === "90d" ? 90 : null;
+  const cutoff = days === null ? 0 : now - days * 24 * 60 * 60 * 1000;
+  const rows: UsageSessionRow[] = sessions
+    .filter((s) => includeArchived || !s.archived)
+    .filter((s) => range === "all" || s.mtime_ms >= cutoff)
+    .map((s) => {
+      const contextTokens = Math.max(0, s.context_tokens || 0);
+      const outputTokens = Math.max(0, s.output_tokens || 0);
+      const cwd = s.cwd || "";
+      return {
+        id: s.id,
+        title: s.title || "(untitled)",
+        cwd,
+        project: basename(cwd) || cwd || "(unknown)",
+        model: s.model || "(default)",
+        updatedAt: formatDateTime(s.mtime_ms),
+        updatedMs: s.mtime_ms,
+        messageCount: s.message_count,
+        contextTokens,
+        outputTokens,
+        totalTokens: contextTokens + outputTokens,
+        estimatedCostUsd: Math.max(0, s.total_cost_usd || 0),
+        archived: s.archived,
+      };
+    })
+    .sort((a, b) => b.updatedMs - a.updatedMs);
+
+  const bucketMap = new Map<string, UsageRollup>();
+  const projectMap = new Map<string, UsageRollup>();
+  const modelMap = new Map<string, UsageRollup>();
+  const totals: UsageRollup = {
+    key: "total",
+    label: "Total",
+    sessions: 0,
+    contextTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cost: 0,
+  };
+
+  for (const row of rows) {
+    const day = row.updatedMs ? dateKey(row.updatedMs) : "unknown";
+    addUsage(
+      bucketMap,
+      day,
+      day === "unknown" ? "Unknown" : shortDateLabel(day),
+      row,
+    );
+    addUsage(projectMap, row.cwd || "(unknown)", row.project, row);
+    addUsage(modelMap, row.model, row.model, row);
+    totals.sessions += 1;
+    totals.contextTokens += row.contextTokens;
+    totals.outputTokens += row.outputTokens;
+    totals.totalTokens += row.totalTokens;
+    totals.cost += row.estimatedCostUsd;
+  }
+
+  const buckets = Array.from(bucketMap.values()).sort((a, b) =>
+    a.key.localeCompare(b.key),
+  );
+  const projects = Array.from(projectMap.values()).sort(
+    (a, b) => b.totalTokens - a.totalTokens || b.cost - a.cost,
+  );
+  const models = Array.from(modelMap.values()).sort(
+    (a, b) => b.totalTokens - a.totalTokens || b.cost - a.cost,
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    range,
+    includeArchived,
+    totals,
+    buckets,
+    projects,
+    models,
+    sessions: rows,
+  };
+}
+
+function csvCell(value: unknown): string {
+  const text = value == null ? "" : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function csvLine(values: unknown[]): string {
+  return values.map(csvCell).join(",");
+}
+
+function usageReportToCsv(report: UsageReport): string {
+  const lines: string[] = [];
+  lines.push("summary");
+  lines.push(
+    csvLine([
+      "range",
+      "include_archived",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  lines.push(
+    csvLine([
+      report.range,
+      report.includeArchived,
+      report.totals.sessions,
+      report.totals.contextTokens,
+      report.totals.outputTokens,
+      report.totals.totalTokens,
+      report.totals.cost.toFixed(6),
+    ]),
+  );
+  lines.push("");
+  lines.push("daily");
+  lines.push(
+    csvLine([
+      "date",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  for (const b of report.buckets) {
+    lines.push(
+      csvLine([
+        b.key,
+        b.sessions,
+        b.contextTokens,
+        b.outputTokens,
+        b.totalTokens,
+        b.cost.toFixed(6),
+      ]),
+    );
+  }
+  lines.push("");
+  lines.push("projects");
+  lines.push(
+    csvLine([
+      "project",
+      "cwd",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  for (const p of report.projects) {
+    lines.push(
+      csvLine([
+        p.label,
+        p.key,
+        p.sessions,
+        p.contextTokens,
+        p.outputTokens,
+        p.totalTokens,
+        p.cost.toFixed(6),
+      ]),
+    );
+  }
+  lines.push("");
+  lines.push("models");
+  lines.push(
+    csvLine([
+      "model",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  for (const m of report.models) {
+    lines.push(
+      csvLine([
+        m.label,
+        m.sessions,
+        m.contextTokens,
+        m.outputTokens,
+        m.totalTokens,
+        m.cost.toFixed(6),
+      ]),
+    );
+  }
+  lines.push("");
+  lines.push("sessions");
+  lines.push(
+    csvLine([
+      "session_id",
+      "title",
+      "project",
+      "cwd",
+      "model",
+      "updated_at",
+      "messages",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+      "archived",
+    ]),
+  );
+  for (const s of report.sessions) {
+    lines.push(
+      csvLine([
+        s.id,
+        s.title,
+        s.project,
+        s.cwd,
+        s.model,
+        s.updatedAt,
+        s.messageCount,
+        s.contextTokens,
+        s.outputTokens,
+        s.totalTokens,
+        s.estimatedCostUsd.toFixed(6),
+        s.archived,
+      ]),
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+async function exportUsageReport(report: UsageReport, format: "json" | "csv") {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .slice(0, 19);
+  const ext = format === "json" ? "json" : "csv";
+  const chosen = await saveDialog({
+    defaultPath: `blackcrab-usage-${stamp}.${ext}`,
+    filters: [
+      format === "json"
+        ? { name: "JSON", extensions: ["json"] }
+        : { name: "CSV", extensions: ["csv"] },
+    ],
+  });
+  if (!chosen) return;
+  const content =
+    format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : usageReportToCsv(report);
+  await invoke("write_text_file", { path: chosen, content });
+}
+
+function UsageDashboard({
+  sessions,
+  onRefresh,
+  onClose,
+}: {
+  sessions: SessionInfo[];
+  onRefresh: () => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [range, setRange] = useState<UsageRange>("30d");
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [metric, setMetric] = useState<UsageMetric>("tokens");
+  const report = useMemo(
+    () => buildUsageReport(sessions, range, includeArchived),
+    [sessions, range, includeArchived],
+  );
+  const visibleBuckets = report.buckets.slice(-42);
+  const maxBarValue =
+    Math.max(
+      1,
+      ...visibleBuckets.map((b) => (metric === "tokens" ? b.totalTokens : b.cost)),
+    );
+  const topProjects = report.projects.slice(0, 12);
+  const topModels = report.models.slice(0, 8);
+  const topSessions = report.sessions.slice(0, 20);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const doExport = (format: "json" | "csv") => {
+    exportUsageReport(report, format).catch(notifyErr("usage export failed"));
+  };
+  const refresh = () => {
+    void onRefresh();
+  };
+
+  return (
+    <div
+      className="usage-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="usage-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="usage-panel">
+        <header className="usage-head">
+          <div>
+            <div className="usage-kicker">Local analytics</div>
+            <h2 id="usage-title">Usage</h2>
+            <div className="usage-subtitle">
+              Estimated from saved Claude session summaries
+            </div>
+          </div>
+          <button
+            type="button"
+            className="search-btn search-close"
+            onClick={onClose}
+            title="close"
+            aria-label="close usage"
+          >
+            ×
+          </button>
+        </header>
+
+        <div className="usage-toolbar">
+          <div className="usage-range" role="group" aria-label="usage range">
+            {USAGE_RANGE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`usage-range-btn ${range === opt.value ? "active" : ""}`}
+                onClick={() => setRange(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <label className="usage-check">
+            <input
+              type="checkbox"
+              checked={includeArchived}
+              onChange={(e) => setIncludeArchived(e.target.checked)}
+            />
+            <span>Include archived</span>
+          </label>
+          <div className="usage-spacer" />
+          <button type="button" className="btn btn-secondary" onClick={refresh}>
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => doExport("csv")}
+          >
+            Export CSV
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => doExport("json")}
+          >
+            Export JSON
+          </button>
+        </div>
+
+        <section className="usage-summary">
+          <div className="usage-summary-card">
+            <span>Tracked tokens</span>
+            <strong>{formatTokens(report.totals.totalTokens)}</strong>
+          </div>
+          <div className="usage-summary-card">
+            <span>Context</span>
+            <strong>{formatTokens(report.totals.contextTokens)}</strong>
+          </div>
+          <div className="usage-summary-card">
+            <span>Output</span>
+            <strong>{formatTokens(report.totals.outputTokens)}</strong>
+          </div>
+          <div className="usage-summary-card">
+            <span>Estimated cost</span>
+            <strong>{formatUsd(report.totals.cost)}</strong>
+          </div>
+          <div className="usage-summary-card">
+            <span>Sessions</span>
+            <strong>{report.totals.sessions}</strong>
+          </div>
+        </section>
+
+        <section className="usage-section">
+          <div className="usage-section-head">
+            <h3>Over time</h3>
+            <div className="usage-range usage-metric" role="group" aria-label="chart metric">
+              <button
+                type="button"
+                className={`usage-range-btn ${metric === "tokens" ? "active" : ""}`}
+                onClick={() => setMetric("tokens")}
+              >
+                Tokens
+              </button>
+              <button
+                type="button"
+                className={`usage-range-btn ${metric === "cost" ? "active" : ""}`}
+                onClick={() => setMetric("cost")}
+              >
+                Cost
+              </button>
+            </div>
+          </div>
+          {visibleBuckets.length === 0 ? (
+            <div className="usage-empty">No sessions in this range</div>
+          ) : (
+            <div className="usage-chart" aria-label="usage over time">
+              {visibleBuckets.map((b) => {
+                const value = metric === "tokens" ? b.totalTokens : b.cost;
+                const pct = Math.max(4, (value / maxBarValue) * 100);
+                return (
+                  <div
+                    key={b.key}
+                    className="usage-bar"
+                    title={`${b.key}: ${formatTokens(b.totalTokens)} tokens, ${formatUsd(b.cost)}`}
+                  >
+                    <div className="usage-bar-track">
+                      <div className="usage-bar-fill" style={{ height: `${pct}%` }} />
+                    </div>
+                    <span>{b.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <div className="usage-columns">
+          <section className="usage-section">
+            <h3>Projects</h3>
+            <UsageRollupTable rows={topProjects} kind="project" />
+          </section>
+          <section className="usage-section">
+            <h3>Models</h3>
+            <UsageRollupTable rows={topModels} kind="model" />
+          </section>
+        </div>
+
+        <section className="usage-section">
+          <h3>Recent sessions</h3>
+          <div className="usage-table-wrap">
+            <table className="usage-table">
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Project</th>
+                  <th>Updated</th>
+                  <th>Tokens</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topSessions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="usage-empty-cell">
+                      No sessions in this range
+                    </td>
+                  </tr>
+                ) : (
+                  topSessions.map((s) => (
+                    <tr key={s.id}>
+                      <td title={s.title}>{s.title}</td>
+                      <td title={s.cwd}>{s.project}</td>
+                      <td>{s.updatedAt}</td>
+                      <td>{formatTokens(s.totalTokens)}</td>
+                      <td>{formatUsd(s.estimatedCostUsd)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function UsageRollupTable({
+  rows,
+  kind,
+}: {
+  rows: UsageRollup[];
+  kind: "project" | "model";
+}) {
+  return (
+    <div className="usage-table-wrap">
+      <table className="usage-table">
+        <thead>
+          <tr>
+            <th>{kind === "project" ? "Project" : "Model"}</th>
+            <th>Sessions</th>
+            <th>Tokens</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="usage-empty-cell">
+                No data
+              </td>
+            </tr>
+          ) : (
+            rows.map((row) => (
+              <tr key={row.key}>
+                <td title={row.key}>{row.label}</td>
+                <td>{row.sessions}</td>
+                <td>{formatTokens(row.totalTokens)}</td>
+                <td>{formatUsd(row.cost)}</td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
