@@ -1719,17 +1719,30 @@ function App() {
   // panel ids. Before mounting a grid tile for the active single-mode
   // session, pause that tile and stop "main" so the backend single-writer
   // gate never sees two owners for the same JSONL.
-  const [gridHandoffSessionId, setGridHandoffSessionId] =
-    useState<string | null>(null);
+  const [gridHandoffSessionIds, setGridHandoffSessionIds] = useState<string[]>(
+    [],
+  );
+  const suspendGridSession = useCallback((sid: string) => {
+    setGridHandoffSessionIds((prev) =>
+      prev.includes(sid) ? prev : [...prev, sid],
+    );
+  }, []);
+  const clearGridHandoffs = useCallback(() => {
+    setGridHandoffSessionIds((prev) => (prev.length === 0 ? prev : []));
+  }, []);
   const leaveGridMode = useEvent(() => {
-    setGridHandoffSessionId(null);
     setGridMode(false);
   });
   const enterGridMode = useEvent(() => {
     const sid = activeSessionIdRef.current;
     if (sid) {
-      setGridHandoffSessionId(sessionOn ? sid : null);
-      if (!gridPanels.includes(sid)) {
+      const existingPanelId = findPanelForSession(
+        sid,
+        gridPanels,
+        panelSessionIds,
+      );
+      if (sessionOn) suspendGridSession(sid);
+      if (!existingPanelId) {
         let replacedId: string | null = null;
         let nextPanels: string[];
         if (gridPanels.length < 6) {
@@ -1757,9 +1770,17 @@ function App() {
             delete next[replacedId];
             return next;
           });
+          setPanelSessionIds((m) => {
+            if (!(replacedId in m)) return m;
+            const next = { ...m };
+            delete next[replacedId];
+            return next;
+          });
         }
+        setSelectedGridPanelId(sid);
+      } else {
+        setSelectedGridPanelId(existingPanelId);
       }
-      setSelectedGridPanelId(sid);
     }
     setGridMode(true);
   });
@@ -1767,15 +1788,28 @@ function App() {
     if (gridMode) leaveGridMode();
     else enterGridMode();
   });
+  const openSessionInSingleMode = useEvent(
+    async (sessionId: string, sessionCwd: string, panelId?: string) => {
+      const ownerPanelId =
+        panelId ?? findPanelForSession(sessionId, gridPanels, panelSessionIds);
+      if (ownerPanelId) {
+        suspendGridSession(sessionId);
+        try {
+          await invoke("stop_session", { panelId: ownerPanelId });
+        } catch {
+          // Best effort: resumeSession will surface any real start failure.
+        }
+      }
+      if (gridMode) leaveGridMode();
+      resumeSession(sessionId, sessionCwd);
+    },
+  );
   useEffect(() => {
-    if (!gridMode) {
-      setGridHandoffSessionId(null);
-      return;
-    }
-    const sid = gridHandoffSessionId;
-    if (!sid) return;
-    if (activeSessionId !== sid || !sessionOn) {
-      setGridHandoffSessionId(null);
+    if (!gridMode) return;
+    if (gridHandoffSessionIds.length === 0) return;
+    const sid = activeSessionId;
+    if (!sid || !gridHandoffSessionIds.includes(sid) || !sessionOn) {
+      clearGridHandoffs();
       return;
     }
     if (busy) return;
@@ -1786,18 +1820,19 @@ function App() {
       if (cancelled) return;
       setSessionOn(false);
       setActiveSessionId(undefined);
-      setGridHandoffSessionId((current) => (current === sid ? null : current));
+      clearGridHandoffs();
     })();
     return () => {
       cancelled = true;
     };
   }, [
     gridMode,
-    gridHandoffSessionId,
+    gridHandoffSessionIds,
     activeSessionId,
     sessionOn,
     busy,
     setActiveSessionId,
+    clearGridHandoffs,
   ]);
 
   // In grid mode, the topbar mirrors whichever panel is currently selected
@@ -1873,8 +1908,7 @@ function App() {
     const next =
       attentionSessions[(currentIndex + 1) % attentionSessions.length];
     ackSessionActivity(next.id);
-    if (gridMode) leaveGridMode();
-    resumeSession(next.id, next.cwd);
+    void openSessionInSingleMode(next.id, next.cwd);
   });
 
   useEffect(() => {
@@ -3949,7 +3983,7 @@ function App() {
       requestAnimationFrame(() => {
         window.setTimeout(() => {
           if (sidebarResumeSeqRef.current !== seq) return;
-          resumeSession(id, cwd);
+          void openSessionInSingleMode(id, cwd);
         }, 0);
       });
     }
@@ -4093,8 +4127,7 @@ function App() {
           onClose={() => setPaletteOpen(false)}
           onPickSession={(id, sessionCwd) => {
             setPaletteOpen(false);
-            if (gridMode) leaveGridMode();
-            resumeSession(id, sessionCwd);
+            void openSessionInSingleMode(id, sessionCwd);
           }}
           commands={[
             {
@@ -4517,12 +4550,13 @@ function App() {
           <LiveGrid
             panels={gridPanels}
             sessions={sessions}
+            panelSessionIds={panelSessionIds}
             sessionCache={sessionCacheRef.current}
             permissionMode={permissionMode}
             defaultCwd={cwd}
             defaultModel={model}
             selectedId={selectedGridPanelId}
-            suspendedSessionId={gridHandoffSessionId}
+            suspendedSessionIds={gridHandoffSessionIds}
             onSelect={setSelectedGridPanelId}
             onAddPanel={addNewGridPanel}
             onRename={renameSession}
@@ -4536,17 +4570,8 @@ function App() {
               refreshSessions();
             }}
             onPanelAttention={onGridPanelAttention}
-            onExpand={async (sid, panelCwd, panelId) => {
-              // Double-click on a grid tile: hand off ownership to
-              // single-view. The grid LivePanel's unmount cleanup also
-              // calls stop_session, but it's fire-and-forget and races
-              // the start_session below — without an explicit await the
-              // single-writer gate rejects with "already open".
-              try {
-                await invoke("stop_session", { panelId });
-              } catch {}
-              leaveGridMode();
-              resumeSession(sid, panelCwd);
+            onExpand={(sid, panelCwd, panelId) => {
+              void openSessionInSingleMode(sid, panelCwd, panelId);
             }}
             onRemove={(id) => {
               setGridPanels((prev) => prev.filter((x) => x !== id));
@@ -7482,12 +7507,13 @@ function StreamingText({ text }: { text: string }) {
 function LiveGrid({
   panels,
   sessions,
+  panelSessionIds,
   sessionCache,
   permissionMode,
   defaultCwd,
   defaultModel,
   selectedId,
-  suspendedSessionId,
+  suspendedSessionIds,
   newPanelCwds,
   newPanelWorktree,
   onAddPanel,
@@ -7501,6 +7527,7 @@ function LiveGrid({
 }: {
   panels: string[];
   sessions: SessionInfo[];
+  panelSessionIds: Record<string, string>;
   sessionCache: Map<
     string,
     { entries: Entry[]; toolUseMap: Map<string, ToolMeta>; mtime_ms: number }
@@ -7509,7 +7536,7 @@ function LiveGrid({
   defaultCwd: string;
   defaultModel: string;
   selectedId: string | null;
-  suspendedSessionId?: string | null;
+  suspendedSessionIds?: string[];
   newPanelCwds: Record<string, string>;
   newPanelWorktree: Record<string, boolean>;
   onAddPanel: () => void;
@@ -7660,6 +7687,10 @@ function LiveGrid({
   // leaves every tile.
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
+  const suspendedSessions = useMemo(
+    () => new Set(suspendedSessionIds ?? []),
+    [suspendedSessionIds],
+  );
 
   if (panels.length === 0) {
     return (
@@ -7739,7 +7770,11 @@ function LiveGrid({
         }}
       >
       {panels.map((id) => {
-        if (id === suspendedSessionId) {
+        const resolvedSessionId = resolvePanelSession(id, panelSessionIds);
+        if (
+          suspendedSessions.has(id) ||
+          (resolvedSessionId ? suspendedSessions.has(resolvedSessionId) : false)
+        ) {
           return (
             <div
               key={id}
@@ -7752,40 +7787,41 @@ function LiveGrid({
             </div>
           );
         }
-        const info = sessions.find((s) => s.id === id);
-        const isNewPanel = id in newPanelCwds;
+        const sessionId = resolvedSessionId ?? id;
+        const info = sessions.find((s) => s.id === sessionId);
+        const isPendingNewPanel = id in newPanelCwds && !resolvedSessionId;
         // Pinned panel whose session info hasn't hydrated yet — wait
         // instead of booting with an empty cwd (which would fail spawn
         // with "project directory doesn't exist"). Happens on app start
         // when gridPanels is restored from localStorage before
         // refreshSessions finishes.
-        if (!isNewPanel && !info) {
+        if (!isPendingNewPanel && !info && !(id in newPanelCwds)) {
           return (
             <div key={id} className="grid-panel loading-skeleton">
               <span className="grid-panel-loading">loading session…</span>
             </div>
           );
         }
-        const panelCwd = isNewPanel
+        const panelCwd = isPendingNewPanel
           ? newPanelCwds[id]
-          : info!.cwd || defaultCwd;
-        const panelModel = isNewPanel
+          : info?.cwd || newPanelCwds[id] || defaultCwd;
+        const panelModel = isPendingNewPanel
           ? defaultModel
-          : info!.model || defaultModel;
+          : info?.model || defaultModel;
         return (
           <LivePanel
             key={id}
             panelId={id}
-            initialSessionId={isNewPanel ? undefined : id}
+            initialSessionId={isPendingNewPanel ? undefined : sessionId}
             initialCwd={panelCwd}
             initialModel={panelModel}
-            initialTitle={isNewPanel ? "new session" : info?.title}
-            initialMtime={isNewPanel ? 0 : info?.mtime_ms ?? 0}
+            initialTitle={isPendingNewPanel ? "new session" : info?.title}
+            initialMtime={isPendingNewPanel ? 0 : info?.mtime_ms ?? 0}
             permissionMode={info?.permission_mode || permissionMode}
             repo=""
             sessionCache={sessionCache}
             isActive={selectedId === id}
-            useWorktree={isNewPanel ? !!newPanelWorktree[id] : false}
+            useWorktree={isPendingNewPanel ? !!newPanelWorktree[id] : false}
             onFocus={() => onSelect(id)}
             onRemove={() => onRemove(id)}
             onRename={onRename}
