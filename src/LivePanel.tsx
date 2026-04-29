@@ -685,6 +685,8 @@ export function LivePanel({
       : justCompleted
       ? "done"
       : "idle";
+  const titlePlaceholder = sessionId ? "(untitled)" : "new session";
+  const displayTitle = title || titlePlaceholder;
 
   return (
     <div
@@ -704,7 +706,7 @@ export function LivePanel({
         if (
           tgt &&
           tgt.closest(
-            "textarea, input, button, a, .editable-title-input, .grid-panel-composer",
+            "textarea, input, button, a, .editable-title, .editable-title-input, .grid-panel-composer",
           )
         )
           return;
@@ -741,16 +743,16 @@ export function LivePanel({
           <EditableTitle
             className="grid-panel-title"
             value={title || ""}
-            placeholder="(new)"
-            title={title || sessionId}
+            placeholder={titlePlaceholder}
+            title={displayTitle}
             onSave={async (next) => {
               setTitle(next);
               await onRename(sessionId, initialCwd, next);
             }}
           />
         ) : (
-          <div className="grid-panel-title" title={title || sessionId}>
-            {title || "(new)"}
+          <div className="grid-panel-title" title={displayTitle}>
+            {displayTitle}
           </div>
         )}
         <div className="grid-panel-meta">
