@@ -1477,6 +1477,14 @@ body[data-resizing="true"] .terminal-resizer::after {
   pointer-events: none;
 }
 
+.terminal-slot-loading {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .terminal-panel-body {
   padding: 6px 8px 2px;
 }

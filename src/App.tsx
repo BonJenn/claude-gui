@@ -1,6 +1,9 @@
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -18,9 +21,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { TerminalPanel, type TerminalInitialWrite } from "./Terminal";
-import { Terminal as XTerm } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import type { TerminalInitialWrite } from "./Terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Webview, getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -35,6 +36,11 @@ import {
 } from "./LivePanel";
 import { subscribeToasts, type Toast, notify, notifyErr } from "./toast";
 import "./App.css";
+
+const TerminalPanel = lazy(() =>
+  import("./Terminal").then((mod) => ({ default: mod.TerminalPanel })),
+);
+const ComputerUseEntryView = lazy(() => import("./ComputerUseEntryView"));
 
 type AvailableUpdate = NonNullable<Awaited<ReturnType<typeof check>>>;
 
@@ -805,19 +811,6 @@ function stripAnsi(text: string): string {
     .replace(/\x1b[PX^_].*?\x1b\\/g, "")
     .replace(/\x1b[@-_]/g, "")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
-}
-
-function needsComputerUseEnablement(output: string): boolean {
-  const text = stripAnsi(output).toLowerCase();
-  return (
-    text.includes("computer-use") &&
-    (text.includes("not enabled") ||
-      text.includes("enable the built-in computer-use") ||
-      text.includes("don't see computer-use") ||
-      text.includes("do not see computer-use") ||
-      text.includes("no computer-use") ||
-      text.includes("run /mcp"))
-  );
 }
 
 function buildAttachmentBody(
@@ -5228,24 +5221,30 @@ function App() {
               </div>
             )}
             <div className="terminal-panel-slots">
-              {terminalTabs.map((t) => (
-                <div
-                  key={t.id}
-                  className={`terminal-slot ${
-                    t.id === activeTerminalId ? "active" : "hidden"
-                  }`}
-                >
-                  <TerminalPanel
-                    terminalId={t.id}
-                    cwd={cwd}
-                    visible={t.id === activeTerminalId}
-                    initialWrites={t.initialWrites}
-                    onInitialWrite={(write) =>
-                      onTerminalInitialWrite(t.id, write)
-                    }
-                  />
-                </div>
-              ))}
+              <Suspense
+                fallback={
+                  <div className="terminal-slot-loading">loading terminal...</div>
+                }
+              >
+                {terminalTabs.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`terminal-slot ${
+                      t.id === activeTerminalId ? "active" : "hidden"
+                    }`}
+                  >
+                    <TerminalPanel
+                      terminalId={t.id}
+                      cwd={cwd}
+                      visible={t.id === activeTerminalId}
+                      initialWrites={t.initialWrites}
+                      onInitialWrite={(write) =>
+                        onTerminalInitialWrite(t.id, write)
+                      }
+                    />
+                  </div>
+                ))}
+              </Suspense>
             </div>
           </div>
         )}
@@ -7584,6 +7583,7 @@ const Sidebar = memo(function Sidebar({
     };
   }, [cancelSidebarScroll]);
   const shortCwd = useMemo(() => shortenPath(cwd), [cwd]);
+  const deferredSearch = useDeferredValue(search);
 
   const projects = useMemo(() => {
     const counts = new Map<string, number>();
@@ -7600,6 +7600,14 @@ const Sidebar = memo(function Sidebar({
       });
   }, [sessions, showArchived]);
 
+  const sessionSearchIndex = useMemo(() => {
+    const index = new Map<string, string>();
+    for (const session of sessions) {
+      index.set(session.id, sessionSearchText(session));
+    }
+    return index;
+  }, [sessions]);
+
   // Global search runs in Rust, debounced, and augments the local metadata
   // filter with transcript snippets. Maps session id -> preview snippet.
   const [contentHits, setContentHits] = useState<Map<
@@ -7607,7 +7615,7 @@ const Sidebar = memo(function Sidebar({
     SessionHitPreview
   > | null>(null);
   useEffect(() => {
-    const q = search.trim();
+    const q = deferredSearch.trim();
     if (q.length < 2) {
       setContentHits(null);
       return;
@@ -7636,17 +7644,17 @@ const Sidebar = memo(function Sidebar({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [search]);
+  }, [deferredSearch]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     const matches = sessions.filter((s) => {
       if (!showArchived && s.archived) return false;
       if (projectFilter && s.cwd !== projectFilter) return false;
       const activityState = deriveSessionActivity(s, activity);
       if (attentionOnly && !isAttentionActivity(activityState)) return false;
       if (!q) return true;
-      if (sessionSearchText(s).includes(q)) {
+      if ((sessionSearchIndex.get(s.id) ?? "").includes(q)) {
         return true;
       }
       // Fall through to the content-search result map.
@@ -7667,13 +7675,14 @@ const Sidebar = memo(function Sidebar({
   }, [
     sessions,
     projectFilter,
-    search,
+    deferredSearch,
     featuredId,
     grouped,
     contentHits,
     activity,
     attentionOnly,
     showArchived,
+    sessionSearchIndex,
   ]);
 
   useLayoutEffect(() => {
@@ -8204,7 +8213,19 @@ export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
   }
 
   if (entry.kind === "computer_use") {
-    return <ComputerUseEntryView entry={entry} />;
+    return (
+      <Suspense fallback={<div className="sysline">loading terminal...</div>}>
+        <ComputerUseEntryView
+          entry={entry}
+          onSend={(terminalId, data) =>
+            computerUseControlsRef.current?.send(terminalId, data)
+          }
+          onStop={(terminalId) =>
+            computerUseControlsRef.current?.stop(terminalId)
+          }
+        />
+      </Suspense>
+    );
   }
 
   if (entry.kind === "system") {
@@ -8221,184 +8242,6 @@ export const EntryView = memo(({ entry, panelId = "main" }: EntryViewProps) => {
 
   return null;
 });
-
-function ComputerUseEntryView({
-  entry,
-}: {
-  entry: Extract<Entry, { kind: "computer_use" }>;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<XTerm | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const writtenRef = useRef(0);
-  const sendRef = useRef<(data: string) => void>(() => {});
-  const [draft, setDraft] = useState("");
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const term = new XTerm({
-      cursorBlink: false,
-      disableStdin: false,
-      fontFamily:
-        'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace',
-      fontSize: 12.5,
-      rows: 18,
-      scrollback: 2500,
-      convertEol: true,
-      theme: {
-        background: "#080808",
-        foreground: "#ededed",
-        cursor: "#e94545",
-      },
-      allowProposedApi: true,
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(el);
-    termRef.current = term;
-    fitRef.current = fit;
-    const writeSub = term.onData((data) => sendRef.current(data));
-    try {
-      fit.fit();
-    } catch {}
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {}
-    });
-    ro.observe(el);
-    return () => {
-      writeSub.dispose();
-      ro.disconnect();
-      term.dispose();
-      termRef.current = null;
-      fitRef.current = null;
-      writtenRef.current = 0;
-    };
-  }, []);
-
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    if (entry.output.length < writtenRef.current) {
-      term.reset();
-      writtenRef.current = 0;
-    }
-    const next = entry.output.slice(writtenRef.current);
-    if (!next) return;
-    writtenRef.current = entry.output.length;
-    term.write(next, () => {
-      try {
-        term.scrollToBottom();
-      } catch {}
-    });
-  }, [entry.output]);
-
-  const canSend = entry.status !== "done" && entry.status !== "error";
-  const needsMcp = needsComputerUseEnablement(entry.output);
-  const send = (data: string) => {
-    if (!canSend) return;
-    computerUseControlsRef.current?.send(entry.terminalId, data);
-  };
-  sendRef.current = send;
-  const sendDraft = () => {
-    const text = draft.trim();
-    if (!text) return;
-    send(`${text}\r`);
-    setDraft("");
-  };
-
-  return (
-    <div className="msg msg-assistant msg-computer-use">
-      <div className="msg-role">computer use</div>
-      <div className="msg-body computer-use-inline">
-        <div className="computer-use-inline-head">
-          <span className={`computer-use-status ${entry.status}`}>
-            {entry.status}
-          </span>
-          <span className="computer-use-inline-note">
-            sidecar Claude Code session
-          </span>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => computerUseControlsRef.current?.stop(entry.terminalId)}
-            disabled={entry.status === "done"}
-          >
-            stop
-          </button>
-        </div>
-        {entry.error && (
-          <div className="computer-use-inline-error">{entry.error}</div>
-        )}
-        {needsMcp && (
-          <div className="computer-use-inline-alert">
-            computer-use is not enabled for this session. Open <code>/mcp</code>{" "}
-            and enable the built-in computer-use server.
-          </div>
-        )}
-        <div
-          ref={containerRef}
-          className="computer-use-inline-terminal"
-          onMouseDown={() => termRef.current?.focus()}
-          title="click here to focus; your keyboard input is sent to the computer-use worker"
-        />
-        <div className="computer-use-inline-controls">
-          <button
-            type="button"
-            className={`btn btn-secondary ${needsMcp ? "mcp-attention" : ""}`}
-            onClick={() => send("/mcp\r")}
-            disabled={!canSend}
-          >
-            open /mcp
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("y")} disabled={!canSend}>
-            y
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("n")} disabled={!canSend}>
-            n
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b[A")} disabled={!canSend}>
-            ↑
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b[B")} disabled={!canSend}>
-            ↓
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("\r")} disabled={!canSend}>
-            enter
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => send("\x1b")} disabled={!canSend}>
-            esc
-          </button>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                sendDraft();
-              }
-            }}
-            placeholder="reply to computer-use worker"
-            disabled={!canSend}
-          />
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={sendDraft}
-            disabled={!canSend || !draft.trim()}
-          >
-            send
-          </button>
-        </div>
-        <div className="computer-use-inline-hint">
-          macOS privacy prompts still need to be approved in the system dialog.
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Module-level handler set by App so markdown links can open in the side
 // preview panel without us re-creating mdComponents on every render.
@@ -9409,6 +9252,7 @@ function CommandPalette({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
   const [idx, setIdx] = useState(0);
   const [contentHits, setContentHits] = useState<Map<
     string,
@@ -9419,8 +9263,16 @@ function CommandPalette({
     inputRef.current?.focus();
   }, []);
 
+  const sessionSearchIndex = useMemo(() => {
+    const index = new Map<string, string>();
+    for (const session of sessions) {
+      index.set(session.id, sessionSearchText(session));
+    }
+    return index;
+  }, [sessions]);
+
   useEffect(() => {
-    const q = query.trim();
+    const q = deferredQuery.trim();
     if (q.length < 2) {
       setContentHits(null);
       return;
@@ -9448,10 +9300,10 @@ function CommandPalette({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [query]);
+  }, [deferredQuery]);
 
   const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = deferredQuery.trim().toLowerCase();
     const cmdHits = commands
       .filter((c) => !q || c.title.toLowerCase().includes(q))
       .map((c) => ({ type: "command" as const, command: c, score: 0 }));
@@ -9464,7 +9316,8 @@ function CommandPalette({
       score: number;
     }> = [];
     for (const s of sessions) {
-      const metadataMatch = !q || sessionSearchText(s).includes(q);
+      const metadataMatch =
+        !q || (sessionSearchIndex.get(s.id) ?? "").includes(q);
       const searchHit = contentHits?.get(s.id);
       if (!q) {
         sessionHits.push({ type: "session", session: s, score: 0 });
@@ -9490,7 +9343,7 @@ function CommandPalette({
     }
     sessionHits.sort((a, b) => a.score - b.score);
     return [...cmdHits, ...sessionHits.slice(0, 20)];
-  }, [query, commands, sessions, contentHits]);
+  }, [deferredQuery, commands, sessions, contentHits, sessionSearchIndex]);
 
   useEffect(() => {
     setIdx(0);

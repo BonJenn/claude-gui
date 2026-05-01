@@ -1093,7 +1093,10 @@ fn switch_branch(cwd: String, branch: String) -> Result<(), String> {
     }
 }
 
-fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
+fn summarize_session_with_search(
+    path: &std::path::Path,
+    needle: Option<&str>,
+) -> Option<(SessionInfo, Option<SessionContentHit>)> {
     let id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1128,6 +1131,8 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
     let mut last_event_type = String::new();
     let mut last_result_subtype = String::new();
     let mut last_result_is_error = false;
+    let mut content_match_count: u32 = 0;
+    let mut content_preview = String::new();
     // Authoritative contextWindow reported by the CLI in each result
     // event's `modelUsage` map. Indexed by model name so we can pick
     // the main model's window at the end — sub-agents like Haiku have
@@ -1155,6 +1160,16 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
             permission_mode = pm.to_string();
         }
         let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if let Some(needle) = needle {
+            if t == "user" || t == "assistant" {
+                search_content_value(
+                    v.pointer("/message/content"),
+                    needle,
+                    &mut content_match_count,
+                    &mut content_preview,
+                );
+            }
+        }
         match t {
             "custom-title" => {
                 if let Some(s) = v.get("customTitle").and_then(|x| x.as_str()) {
@@ -1292,7 +1307,7 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         .unwrap_or_else(|| context_limit_for(&model, max_context_seen));
     let interrupted = !archived && message_count > 0 && last_event_type != "result";
 
-    Some(SessionInfo {
+    let info = SessionInfo {
         id,
         title: truncated,
         cwd: session_cwd,
@@ -1309,7 +1324,21 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
         last_event_type,
         last_result_subtype,
         last_result_is_error,
-    })
+    };
+    let content_hit = if content_match_count == 0 {
+        None
+    } else {
+        Some(SessionContentHit {
+            match_count: content_match_count,
+            preview: content_preview,
+        })
+    };
+
+    Some((info, content_hit))
+}
+
+fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
+    summarize_session_with_search(path, None).map(|(info, _)| info)
 }
 
 #[derive(serde::Serialize)]
@@ -1363,8 +1392,10 @@ fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(info) = summarize_session(&path) {
-                if let Some(hit) = build_session_search_hit(&path, info, &needle) {
+            if let Some((info, content_hit)) =
+                summarize_session_with_search(&path, Some(&needle))
+            {
+                if let Some(hit) = build_session_search_hit(info, content_hit, &needle) {
                     let should_replace = by_id
                         .get(&hit.session_id)
                         .map(|existing| {
@@ -1391,8 +1422,8 @@ fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
 }
 
 fn build_session_search_hit(
-    path: &std::path::Path,
     info: SessionInfo,
+    content_hit: Option<SessionContentHit>,
     needle: &str,
 ) -> Option<SessionSearchHit> {
     let project = display_basename(&info.cwd);
@@ -1410,7 +1441,7 @@ fn build_session_search_hit(
         }
     }
 
-    if let Some(content) = search_in_session(path, needle) {
+    if let Some(content) = content_hit {
         match_count = match_count.saturating_add(content.match_count);
         if preview.is_empty() {
             preview = content.preview;
@@ -1525,71 +1556,55 @@ fn build_preview(snippet: &str, pos: usize, needle_len: usize) -> String {
     slice.replace('\n', " ").trim().to_string()
 }
 
-fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionContentHit> {
-    let file = std::fs::File::open(path).ok()?;
-    use std::io::BufRead;
-    let reader = std::io::BufReader::new(file);
-    let mut match_count: u32 = 0;
-    let mut preview = String::new();
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-        if t != "user" && t != "assistant" {
-            continue;
-        }
-        let texts = collect_text(v.pointer("/message/content"));
-        for snippet in texts {
-            let haystack = snippet.to_lowercase();
-            if let Some(pos) = haystack.find(needle) {
-                match_count += 1;
-                if preview.is_empty() {
-                    preview = build_preview(&snippet, pos, needle.len());
-                }
-            }
-        }
-    }
-    if match_count == 0 {
-        return None;
-    }
-    Some(SessionContentHit {
-        match_count,
-        preview,
-    })
-}
-
-fn collect_text(content: Option<&serde_json::Value>) -> Vec<String> {
-    let Some(v) = content else { return Vec::new() };
+fn search_content_value(
+    content: Option<&serde_json::Value>,
+    needle: &str,
+    match_count: &mut u32,
+    preview: &mut String,
+) {
+    let Some(v) = content else {
+        return;
+    };
     if let Some(s) = v.as_str() {
-        return vec![s.to_string()];
+        search_text_fragment(s, needle, match_count, preview);
+        return;
     }
-    let Some(arr) = v.as_array() else { return Vec::new() };
-    let mut out = Vec::new();
+    let Some(arr) = v.as_array() else {
+        return;
+    };
     for block in arr {
         let t = block.get("type").and_then(|x| x.as_str()).unwrap_or("");
         if t == "text" {
             if let Some(s) = block.get("text").and_then(|x| x.as_str()) {
-                out.push(s.to_string());
+                search_text_fragment(s, needle, match_count, preview);
             }
         } else if t == "tool_result" {
             if let Some(s) = block.get("content").and_then(|x| x.as_str()) {
-                out.push(s.to_string());
+                search_text_fragment(s, needle, match_count, preview);
             } else if let Some(inner) = block.get("content").and_then(|x| x.as_array()) {
                 for ib in inner {
                     if let Some(s) = ib.get("text").and_then(|x| x.as_str()) {
-                        out.push(s.to_string());
+                        search_text_fragment(s, needle, match_count, preview);
                     }
                 }
             }
         }
     }
-    out
+}
+
+fn search_text_fragment(
+    snippet: &str,
+    needle: &str,
+    match_count: &mut u32,
+    preview: &mut String,
+) {
+    let haystack = snippet.to_lowercase();
+    if let Some(pos) = haystack.find(needle) {
+        *match_count = match_count.saturating_add(1);
+        if preview.is_empty() {
+            *preview = build_preview(snippet, pos, needle.len());
+        }
+    }
 }
 
 #[tauri::command]
