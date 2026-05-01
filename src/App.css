@@ -1612,11 +1612,26 @@ body[data-resizing="true"] .terminal-resizer::after {
 
 .palette-preview {
   width: 100%;
+  display: flex;
+  gap: 8px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
   padding: 4px 0 0 34px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-preview-source {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.palette-preview span:last-child {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

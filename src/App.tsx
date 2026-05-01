@@ -161,6 +161,24 @@ type SessionInfo = {
   last_result_is_error: boolean;
 };
 
+type SessionSearchHit = {
+  session_id: string;
+  title: string;
+  cwd: string;
+  project: string;
+  model: string;
+  updated_ms: number;
+  source: string;
+  match_count: number;
+  preview: string;
+};
+
+type SessionHitPreview = {
+  preview: string;
+  matchCount: number;
+  source: string;
+};
+
 export type PanelAttentionState =
   | "engaged"
   | "permission"
@@ -6634,6 +6652,54 @@ function basename(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
+function sessionSearchText(s: SessionInfo): string {
+  const updated = s.mtime_ms ? new Date(s.mtime_ms) : null;
+  const dateParts = updated
+    ? [
+        updated.toLocaleDateString(),
+        updated.toLocaleDateString(undefined, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
+        updated.getFullYear().toString(),
+      ]
+    : [];
+  return [
+    s.title,
+    s.cwd,
+    basename(s.cwd),
+    s.id,
+    s.model,
+    s.permission_mode,
+    ...dateParts,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function searchHitLabel(hit: SessionHitPreview): string {
+  switch (hit.source) {
+    case "title":
+      return "title";
+    case "project":
+      return "project";
+    case "cwd":
+      return "path";
+    case "model":
+      return "model";
+    case "date":
+      return "date";
+    case "id":
+      return "id";
+    case "content":
+      return `${hit.matchCount} match${hit.matchCount === 1 ? "" : "es"}`;
+    default:
+      return "match";
+  }
+}
+
 function useResizable(
   initial: number,
   min: number,
@@ -6857,11 +6923,11 @@ const Sidebar = memo(function Sidebar({
       });
   }, [sessions, showArchived]);
 
-  // Content search runs in Rust, debounced, and augments the
-  // title/basename/id filter. Maps session id -> preview snippet.
+  // Global search runs in Rust, debounced, and augments the local metadata
+  // filter with transcript snippets. Maps session id -> preview snippet.
   const [contentHits, setContentHits] = useState<Map<
     string,
-    { preview: string; matchCount: number }
+    SessionHitPreview
   > | null>(null);
   useEffect(() => {
     const q = search.trim();
@@ -6869,19 +6935,18 @@ const Sidebar = memo(function Sidebar({
       setContentHits(null);
       return;
     }
+    setContentHits(null);
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      invoke<Array<{ session_id: string; match_count: number; preview: string }>>(
-        "search_sessions",
-        { query: q },
-      )
+      invoke<SessionSearchHit[]>("search_sessions", { query: q })
         .then((hits) => {
           if (cancelled) return;
-          const m = new Map<string, { preview: string; matchCount: number }>();
+          const m = new Map<string, SessionHitPreview>();
           for (const h of hits) {
             m.set(h.session_id, {
               preview: h.preview,
               matchCount: h.match_count,
+              source: h.source,
             });
           }
           setContentHits(m);
@@ -6904,11 +6969,7 @@ const Sidebar = memo(function Sidebar({
       const activityState = deriveSessionActivity(s, activity);
       if (attentionOnly && !isAttentionActivity(activityState)) return false;
       if (!q) return true;
-      if (
-        s.title.toLowerCase().includes(q) ||
-        basename(s.cwd).toLowerCase().includes(q) ||
-        s.id.toLowerCase().includes(q)
-      ) {
+      if (sessionSearchText(s).includes(q)) {
         return true;
       }
       // Fall through to the content-search result map.
@@ -7040,7 +7101,7 @@ const Sidebar = memo(function Sidebar({
         <input
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="search sessions…"
+          placeholder="search sessions, projects, dates…"
           spellCheck={false}
         />
         {search && (
@@ -7251,7 +7312,7 @@ function renderSessionItem(
     itemRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
     grouped: boolean;
     activity: SessionActivityStore;
-    contentHit?: { preview: string; matchCount: number };
+    contentHit?: SessionHitPreview;
   },
 ) {
   const ctxRatio =
@@ -7379,8 +7440,7 @@ function renderSessionItem(
       {ctx.contentHit && (
         <div className="session-hit-preview" title={ctx.contentHit.preview}>
           <span className="session-hit-count">
-            {ctx.contentHit.matchCount} match
-            {ctx.contentHit.matchCount === 1 ? "" : "es"}
+            {searchHitLabel(ctx.contentHit)}
           </span>
           <span className="session-hit-snippet">{ctx.contentHit.preview}</span>
         </div>
@@ -8675,7 +8735,7 @@ function CommandPalette({
   const [idx, setIdx] = useState(0);
   const [contentHits, setContentHits] = useState<Map<
     string,
-    { preview: string; matchCount: number }
+    SessionHitPreview
   > | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -8688,19 +8748,18 @@ function CommandPalette({
       setContentHits(null);
       return;
     }
+    setContentHits(null);
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      invoke<Array<{ session_id: string; match_count: number; preview: string }>>(
-        "search_sessions",
-        { query: q },
-      )
+      invoke<SessionSearchHit[]>("search_sessions", { query: q })
         .then((hits) => {
           if (cancelled) return;
-          const m = new Map<string, { preview: string; matchCount: number }>();
+          const m = new Map<string, SessionHitPreview>();
           for (const h of hits)
             m.set(h.session_id, {
               preview: h.preview,
               matchCount: h.match_count,
+              source: h.source,
             });
           setContentHits(m);
         })
@@ -8723,25 +8782,32 @@ function CommandPalette({
       type: "session";
       session: SessionInfo;
       preview?: string;
+      source?: string;
+      matchCount?: number;
       score: number;
     }> = [];
     for (const s of sessions) {
-      const titleMatch =
-        !q ||
-        s.title.toLowerCase().includes(q) ||
-        basename(s.cwd).toLowerCase().includes(q);
-      const contentMatch = contentHits?.has(s.id);
+      const metadataMatch = !q || sessionSearchText(s).includes(q);
+      const searchHit = contentHits?.get(s.id);
       if (!q) {
         sessionHits.push({ type: "session", session: s, score: 0 });
-      } else if (titleMatch) {
-        sessionHits.push({ type: "session", session: s, score: -10 });
-      } else if (contentMatch) {
-        const h = contentHits!.get(s.id)!;
+      } else if (metadataMatch) {
         sessionHits.push({
           type: "session",
           session: s,
-          preview: h.preview,
-          score: -h.matchCount,
+          preview: searchHit?.preview,
+          source: searchHit?.source,
+          matchCount: searchHit?.matchCount,
+          score: -10,
+        });
+      } else if (searchHit) {
+        sessionHits.push({
+          type: "session",
+          session: s,
+          preview: searchHit.preview,
+          source: searchHit.source,
+          matchCount: searchHit.matchCount,
+          score: -searchHit.matchCount,
         });
       }
     }
@@ -8794,7 +8860,7 @@ function CommandPalette({
         <input
           ref={inputRef}
           className="palette-input"
-          placeholder="jump to session or run a command…"
+          placeholder="search sessions, transcripts, or commands…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
@@ -8845,7 +8911,18 @@ function CommandPalette({
                     {basename(r.session.cwd) || r.session.cwd}
                   </span>
                   {r.preview && (
-                    <div className="palette-preview">{r.preview}</div>
+                    <div className="palette-preview">
+                      {r.source && (
+                        <span className="palette-preview-source">
+                          {searchHitLabel({
+                            preview: r.preview,
+                            matchCount: r.matchCount ?? 1,
+                            source: r.source,
+                          })}
+                        </span>
+                      )}
+                      <span>{r.preview}</span>
+                    </div>
                   )}
                 </div>
               );
