@@ -1295,6 +1295,7 @@ function App() {
   );
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [projectDashboardOpen, setProjectDashboardOpen] = useState(false);
   const [activeSessionId, _setActiveSessionIdState] =
     useState<string | undefined>();
   const [sidebarSelectedSessionId, setSidebarSelectedSessionId] =
@@ -3435,6 +3436,27 @@ function App() {
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
+  async function startNewSessionInProject(projectCwd: string) {
+    const targetCwd = projectCwd.trim();
+    if (!targetCwd) return;
+    if (sessionOn) {
+      switchingSessionRef.current = true;
+      try {
+        await stopSession();
+      } finally {
+        switchingSessionRef.current = false;
+      }
+    }
+    setGridMode(false);
+    resetSessionState();
+    setCwd(targetCwd);
+    setProjectFilter(targetCwd);
+    setModel(appSettings.defaultModel);
+    setPermissionMode(appSettings.defaultPermissionMode);
+    setProjectDashboardOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   async function addNewGridPanel() {
     let chosen: string | null = null;
     try {
@@ -4348,6 +4370,18 @@ function App() {
               },
             },
             {
+              id: "project-dashboard",
+              title: projectDashboardOpen
+                ? "Close project dashboard"
+                : "Open project dashboard",
+              hint: "projects",
+              run: () => {
+                setProjectDashboardOpen((v) => !v);
+                if (!projectDashboardOpen) void refreshSessions();
+                setPaletteOpen(false);
+              },
+            },
+            {
               id: "computer-use",
               title: "Open computer use session",
               hint: "/mcp",
@@ -4472,6 +4506,21 @@ function App() {
           sessions={sessions}
           onRefresh={refreshSessions}
           onClose={() => setUsageOpen(false)}
+        />
+      )}
+      {projectDashboardOpen && (
+        <ProjectDashboard
+          sessions={sessions}
+          activity={sessionActivity}
+          onClose={() => setProjectDashboardOpen(false)}
+          onRefresh={refreshSessions}
+          onOpenSession={(sessionId, sessionCwd) => {
+            setProjectDashboardOpen(false);
+            void openSessionInSingleMode(sessionId, sessionCwd);
+          }}
+          onNewSession={(projectCwd) => {
+            void startNewSessionInProject(projectCwd);
+          }}
         />
       )}
       {worktreePrompt && (
@@ -4667,6 +4716,17 @@ function App() {
               title="usage dashboard"
             >
               usage
+            </button>
+            <button
+              type="button"
+              className={`btn btn-secondary grid-mode-toggle ${projectDashboardOpen ? "active" : ""}`}
+              onClick={() => {
+                setProjectDashboardOpen(true);
+                void refreshSessions();
+              }}
+              title="project dashboard"
+            >
+              projects
             </button>
             <button
               type="button"
@@ -6217,6 +6277,278 @@ function UsageRollupTable({
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+type ProjectDashboardProject = {
+  cwd: string;
+  name: string;
+  sessions: SessionInfo[];
+  latestMs: number;
+  messageCount: number;
+  contextTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cost: number;
+  attentionCount: number;
+};
+
+function buildProjectDashboardProjects(
+  sessions: SessionInfo[],
+  activity: SessionActivityStore,
+): ProjectDashboardProject[] {
+  const map = new Map<string, ProjectDashboardProject>();
+  for (const session of sessions) {
+    if (session.archived) continue;
+    const cwd = session.cwd || "(unknown)";
+    const project =
+      map.get(cwd) ??
+      {
+        cwd,
+        name: basename(cwd) || cwd,
+        sessions: [],
+        latestMs: 0,
+        messageCount: 0,
+        contextTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        cost: 0,
+        attentionCount: 0,
+      };
+    const sessionActivity = deriveSessionActivity(session, activity);
+    project.sessions.push(session);
+    project.latestMs = Math.max(project.latestMs, session.mtime_ms);
+    project.messageCount += session.message_count;
+    project.contextTokens += Math.max(0, session.context_tokens || 0);
+    project.outputTokens += Math.max(0, session.output_tokens || 0);
+    project.totalTokens +=
+      Math.max(0, session.context_tokens || 0) +
+      Math.max(0, session.output_tokens || 0);
+    project.cost += Math.max(0, session.total_cost_usd || 0);
+    if (isAttentionActivity(sessionActivity)) project.attentionCount += 1;
+    map.set(cwd, project);
+  }
+
+  return Array.from(map.values())
+    .map((project) => ({
+      ...project,
+      sessions: project.sessions
+        .slice()
+        .sort((a, b) => b.mtime_ms - a.mtime_ms),
+    }))
+    .sort((a, b) => b.latestMs - a.latestMs);
+}
+
+function ProjectDashboard({
+  sessions,
+  activity,
+  onClose,
+  onRefresh,
+  onOpenSession,
+  onNewSession,
+}: {
+  sessions: SessionInfo[];
+  activity: SessionActivityStore;
+  onClose: () => void;
+  onRefresh: () => void | Promise<void>;
+  onOpenSession: (sessionId: string, cwd: string) => void;
+  onNewSession: (cwd: string) => void;
+}) {
+  const projects = useMemo(
+    () => buildProjectDashboardProjects(sessions, activity),
+    [sessions, activity],
+  );
+  const [selectedCwd, setSelectedCwd] = useState("");
+  const selectedProject =
+    projects.find((project) => project.cwd === selectedCwd) ?? projects[0];
+  const totalSessions = projects.reduce(
+    (count, project) => count + project.sessions.length,
+    0,
+  );
+  const totalAttention = projects.reduce(
+    (count, project) => count + project.attentionCount,
+    0,
+  );
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      if (selectedCwd) setSelectedCwd("");
+      return;
+    }
+    if (!selectedProject) {
+      setSelectedCwd(projects[0].cwd);
+    }
+  }, [projects, selectedCwd, selectedProject]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="project-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="project-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="project-panel">
+        <header className="project-head">
+          <div>
+            <div className="project-kicker">Projects</div>
+            <h2 id="project-title">Project Dashboard</h2>
+            <div className="project-subtitle">
+              {projects.length} projects, {totalSessions} active sessions
+            </div>
+          </div>
+          <button
+            type="button"
+            className="search-btn search-close"
+            onClick={onClose}
+            title="close"
+            aria-label="close project dashboard"
+          >
+            ×
+          </button>
+        </header>
+
+        <div className="project-toolbar">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void onRefresh()}
+          >
+            Refresh
+          </button>
+          <span className="project-toolbar-stat">
+            {totalAttention} sessions need attention
+          </span>
+        </div>
+
+        {projects.length === 0 ? (
+          <div className="project-empty">No active projects found</div>
+        ) : (
+          <div className="project-body">
+            <aside className="project-list" aria-label="projects">
+              {projects.map((project) => (
+                <button
+                  key={project.cwd}
+                  type="button"
+                  className={`project-row ${
+                    selectedProject?.cwd === project.cwd ? "active" : ""
+                  }`}
+                  onClick={() => setSelectedCwd(project.cwd)}
+                  title={project.cwd}
+                >
+                  <span className="project-row-title">{project.name}</span>
+                  <span className="project-row-meta">
+                    {project.sessions.length} sessions · {relativeTime(project.latestMs)}
+                  </span>
+                  <span className="project-row-meta">
+                    {formatTokens(project.totalTokens)} · {formatUsd(project.cost)}
+                  </span>
+                  {project.attentionCount > 0 && (
+                    <span className="project-row-attention">
+                      {project.attentionCount} attention
+                    </span>
+                  )}
+                </button>
+              ))}
+            </aside>
+
+            {selectedProject && (
+              <section className="project-detail">
+                <div className="project-detail-head">
+                  <div>
+                    <h3>{selectedProject.name}</h3>
+                    <div className="project-path" title={selectedProject.cwd}>
+                      {selectedProject.cwd}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => onNewSession(selectedProject.cwd)}
+                  >
+                    New session
+                  </button>
+                </div>
+
+                <div className="project-summary">
+                  <div className="project-summary-item">
+                    <span>Sessions</span>
+                    <strong>{selectedProject.sessions.length}</strong>
+                  </div>
+                  <div className="project-summary-item">
+                    <span>Tokens</span>
+                    <strong>{formatTokens(selectedProject.totalTokens)}</strong>
+                  </div>
+                  <div className="project-summary-item">
+                    <span>Cost</span>
+                    <strong>{formatUsd(selectedProject.cost)}</strong>
+                  </div>
+                  <div className="project-summary-item">
+                    <span>Attention</span>
+                    <strong>{selectedProject.attentionCount}</strong>
+                  </div>
+                </div>
+
+                <div className="project-table-wrap">
+                  <table className="project-table">
+                    <thead>
+                      <tr>
+                        <th>Session</th>
+                        <th>State</th>
+                        <th>Updated</th>
+                        <th>Tokens</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedProject.sessions.slice(0, 16).map((session) => {
+                        const state = deriveSessionActivity(session, activity);
+                        return (
+                          <tr key={session.id}>
+                            <td title={session.title}>{session.title}</td>
+                            <td>{sessionActivityLabel(state)}</td>
+                            <td>{relativeTime(session.mtime_ms)}</td>
+                            <td>
+                              {formatTokens(
+                                session.context_tokens + session.output_tokens,
+                              )}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={() =>
+                                  onOpenSession(session.id, session.cwd)
+                                }
+                              >
+                                Open
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
