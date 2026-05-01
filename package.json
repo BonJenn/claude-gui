@@ -1,7 +1,7 @@
 {
   "name": "blackcrab",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A local desktop GUI for Claude Code sessions.",
   "author": "Jonathan Benn",
   "license": "Apache-2.0",
