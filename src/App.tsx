@@ -179,6 +179,30 @@ type SessionHitPreview = {
   source: string;
 };
 
+type SessionInfoUpdater = (session: SessionInfo) => SessionInfo;
+
+function patchSessionInfoList(
+  sessions: SessionInfo[],
+  id: string,
+  updater: SessionInfoUpdater,
+): SessionInfo[] {
+  let changed = false;
+  const next = sessions.map((session) => {
+    if (session.id !== id) return session;
+    changed = true;
+    return updater(session);
+  });
+  return changed ? next : sessions;
+}
+
+function removeSessionInfoFromList(
+  sessions: SessionInfo[],
+  id: string,
+): SessionInfo[] {
+  const next = sessions.filter((session) => session.id !== id);
+  return next.length === sessions.length ? sessions : next;
+}
+
 export type PanelAttentionState =
   | "engaged"
   | "permission"
@@ -1249,6 +1273,18 @@ function App() {
   const [hasNewBelow, setHasNewBelow] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const replaceSessionInfoList = useCallback((next: SessionInfo[]) => {
+    setSessions(next);
+  }, []);
+  const updateSessionInfo = useCallback(
+    (id: string, updater: SessionInfoUpdater) => {
+      setSessions((prev) => patchSessionInfoList(prev, id, updater));
+    },
+    [],
+  );
+  const removeSessionInfo = useCallback((id: string) => {
+    setSessions((prev) => removeSessionInfoFromList(prev, id));
+  }, []);
   const [sessionActivity, setSessionActivity] =
     useState<SessionActivityStore>(() => loadSessionActivity());
   const [sidebarAttentionOnly, setSidebarAttentionOnly] = useState<boolean>(
@@ -2583,20 +2619,20 @@ function App() {
 
   const refreshSessions = useCallback(async () => {
     if (!isTauriRuntime()) {
-      setSessions([]);
+      replaceSessionInfoList([]);
       setSessionsLoading(false);
       return;
     }
     setSessionsLoading(true);
     try {
       const list = await invoke<SessionInfo[]>("list_sessions");
-      setSessions(list);
+      replaceSessionInfoList(list);
     } catch (e) {
       notifyErr("failed to load sessions")(e);
     } finally {
       setSessionsLoading(false);
     }
-  }, []);
+  }, [replaceSessionInfoList]);
 
   const openUsageDashboard = useCallback(() => {
     setUsageOpen(true);
@@ -2621,7 +2657,7 @@ function App() {
       if (!window.confirm(`Move session ${label} to trash?`)) return;
       invoke("delete_session", { sessionId: id, cwd: sessionCwd })
         .then(() => {
-          setSessions((prev) => prev.filter((s) => s.id !== id));
+          removeSessionInfo(id);
           if (activeSessionIdRef.current === id) {
             setActiveSessionId(undefined);
             setSessionOn(false);
@@ -2650,7 +2686,7 @@ function App() {
         })
         .catch(notifyErr("failed to delete session"));
     },
-    [panelSessionIds, setActiveSessionId],
+    [panelSessionIds, removeSessionInfo, setActiveSessionId],
   );
 
   const archiveSession = useCallback(
@@ -2661,9 +2697,7 @@ function App() {
           cwd: sessionCwd,
           archived,
         });
-        setSessions((prev) =>
-          prev.map((s) => (s.id === id ? { ...s, archived } : s)),
-        );
+        updateSessionInfo(id, (session) => ({ ...session, archived }));
         if (archived) {
           ackSessionActivity(id);
         }
@@ -2671,7 +2705,7 @@ function App() {
         notifyErr(archived ? "failed to archive session" : "failed to unarchive session")(e);
       }
     },
-    [ackSessionActivity],
+    [ackSessionActivity, updateSessionInfo],
   );
 
   const renameSession = useCallback(
@@ -2684,14 +2718,12 @@ function App() {
           cwd: sessionCwd,
           title: trimmed,
         });
-        setSessions((prev) =>
-          prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s)),
-        );
+        updateSessionInfo(id, (session) => ({ ...session, title: trimmed }));
       } catch (e) {
         notifyErr("failed to rename session")(e);
       }
     },
-    [],
+    [updateSessionInfo],
   );
 
   const refreshBranches = useCallback(async (targetCwd: string) => {
