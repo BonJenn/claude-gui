@@ -1315,14 +1315,25 @@ fn summarize_session(path: &std::path::Path) -> Option<SessionInfo> {
 #[derive(serde::Serialize)]
 struct SessionSearchHit {
     session_id: String,
+    title: String,
+    cwd: String,
+    project: String,
+    model: String,
+    updated_ms: u128,
+    source: String,
     match_count: u32,
     preview: String,
 }
 
-// Greps every session JSONL for `query` and returns the sessions
-// that matched (plus a short preview of the first match). Case-
-// insensitive substring match against user and assistant text
-// content. Bounded pretty loosely — we return up to 200 hits.
+struct SessionContentHit {
+    match_count: u32,
+    preview: String,
+}
+
+// Searches every session JSONL for `query` and returns session-level hits.
+// Matches include metadata (title, cwd/project, model, updated date) plus user
+// and assistant transcript text. Bounded pretty loosely — we return up to 200
+// hits after sorting by match count and recency.
 #[tauri::command]
 fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
     let needle = query.trim().to_lowercase();
@@ -1336,7 +1347,7 @@ fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
     if !projects.exists() {
         return Ok(Vec::new());
     }
-    let mut out: Vec<SessionSearchHit> = Vec::new();
+    let mut by_id: HashMap<String, SessionSearchHit> = HashMap::new();
     let dirs = fs::read_dir(&projects).map_err(|e| e.to_string())?;
     for dir_entry in dirs.flatten() {
         let dir_path = dir_entry.path();
@@ -1352,17 +1363,142 @@ fn search_sessions(query: String) -> Result<Vec<SessionSearchHit>, String> {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(hit) = search_in_session(&path, &needle) {
-                out.push(hit);
-                if out.len() >= 200 {
-                    return Ok(out);
+            if let Some(info) = summarize_session(&path) {
+                if let Some(hit) = build_session_search_hit(&path, info, &needle) {
+                    let should_replace = by_id
+                        .get(&hit.session_id)
+                        .map(|existing| {
+                            hit.match_count > existing.match_count
+                                || (hit.match_count == existing.match_count
+                                    && hit.updated_ms > existing.updated_ms)
+                        })
+                        .unwrap_or(true);
+                    if should_replace {
+                        by_id.insert(hit.session_id.clone(), hit);
+                    }
                 }
             }
         }
     }
-    // Sort by match_count desc so the most relevant sessions float up.
-    out.sort_by(|a, b| b.match_count.cmp(&a.match_count));
+    let mut out: Vec<SessionSearchHit> = by_id.into_values().collect();
+    out.sort_by(|a, b| {
+        b.match_count
+            .cmp(&a.match_count)
+            .then_with(|| b.updated_ms.cmp(&a.updated_ms))
+    });
+    out.truncate(200);
     Ok(out)
+}
+
+fn build_session_search_hit(
+    path: &std::path::Path,
+    info: SessionInfo,
+    needle: &str,
+) -> Option<SessionSearchHit> {
+    let project = display_basename(&info.cwd);
+    let mut match_count: u32 = 0;
+    let mut preview = String::new();
+    let mut source = String::new();
+
+    for (field_source, field_label, field_value) in session_search_fields(&info, &project) {
+        if field_value.to_lowercase().contains(needle) {
+            match_count = match_count.saturating_add(1);
+            if preview.is_empty() {
+                preview = format!("{}: {}", field_label, field_value);
+                source = field_source.to_string();
+            }
+        }
+    }
+
+    if let Some(content) = search_in_session(path, needle) {
+        match_count = match_count.saturating_add(content.match_count);
+        if preview.is_empty() {
+            preview = content.preview;
+            source = "content".into();
+        }
+    }
+
+    if match_count == 0 {
+        return None;
+    }
+
+    if preview.is_empty() {
+        preview = info.title.clone();
+    }
+    if source.is_empty() {
+        source = "metadata".into();
+    }
+
+    Some(SessionSearchHit {
+        session_id: info.id,
+        title: info.title,
+        cwd: info.cwd,
+        project,
+        model: info.model,
+        updated_ms: info.mtime_ms,
+        source,
+        match_count,
+        preview,
+    })
+}
+
+fn session_search_fields<'a>(
+    info: &'a SessionInfo,
+    project: &'a str,
+) -> Vec<(&'static str, &'static str, String)> {
+    let mut out = vec![
+        ("title", "title", info.title.clone()),
+        ("project", "project", project.to_string()),
+        ("cwd", "path", info.cwd.clone()),
+        ("model", "model", info.model.clone()),
+        ("id", "session", info.id.clone()),
+    ];
+    out.extend(
+        session_date_labels(info.mtime_ms)
+            .into_iter()
+            .map(|label| ("date", "updated", label)),
+    );
+    out
+}
+
+fn display_basename(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn session_date_labels(ms: u128) -> Vec<String> {
+    if ms == 0 {
+        return Vec::new();
+    }
+    let secs = (ms / 1000) as u64;
+    let (y, mo, da, _, _, _) = epoch_to_ymdhms(secs);
+    let month_idx = mo.saturating_sub(1).min(11) as usize;
+    const SHORT_MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const LONG_MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    vec![
+        format!("{:04}-{:02}-{:02}", y, mo, da),
+        format!("{:02}/{:02}/{:04}", mo, da, y),
+        format!("{} {}", SHORT_MONTHS[month_idx], da),
+        format!("{} {}", LONG_MONTHS[month_idx], da),
+        y.to_string(),
+    ]
 }
 
 fn build_preview(snippet: &str, pos: usize, needle_len: usize) -> String {
@@ -1389,8 +1525,7 @@ fn build_preview(snippet: &str, pos: usize, needle_len: usize) -> String {
     slice.replace('\n', " ").trim().to_string()
 }
 
-fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionSearchHit> {
-    let session_id = path.file_stem()?.to_string_lossy().to_string();
+fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionContentHit> {
     let file = std::fs::File::open(path).ok()?;
     use std::io::BufRead;
     let reader = std::io::BufReader::new(file);
@@ -1423,8 +1558,7 @@ fn search_in_session(path: &std::path::Path, needle: &str) -> Option<SessionSear
     if match_count == 0 {
         return None;
     }
-    Some(SessionSearchHit {
-        session_id,
+    Some(SessionContentHit {
         match_count,
         preview,
     })

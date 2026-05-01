@@ -12,7 +12,8 @@ with Claude Code, Tauri, and local developer tools.
 
 ## Features
 
-- Resume and search local Claude Code sessions.
+- Resume and search local Claude Code sessions by title, project, model, date,
+  or transcript text.
 - Run a single conversation or a grid of up to six live panels.
 - Rename, delete, and export sessions as Markdown.
 - View tool calls, diffs, command output, thinking blocks, and permission
