@@ -5684,10 +5684,31 @@ type UsageReport = {
   includeArchived: boolean;
   totals: UsageRollup;
   buckets: UsageRollup[];
+  months: UsageRollup[];
   projects: UsageRollup[];
   models: UsageRollup[];
   sessions: UsageSessionRow[];
 };
+
+type UsageBudget = {
+  monthlyCostUsd: number;
+  monthlyTokens: number;
+};
+
+type UsageHistorySnapshot = {
+  date: string;
+  generatedAt: string;
+  sessions: number;
+  contextTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cost: number;
+  topProjects: UsageRollup[];
+  topModels: UsageRollup[];
+};
+
+const USAGE_HISTORY_KEY = "usage.history.v1";
+const USAGE_BUDGET_KEY = "usage.budget.v1";
 
 const USAGE_RANGE_OPTIONS: Array<{ value: UsageRange; label: string }> = [
   { value: "7d", label: "7 days" },
@@ -5704,9 +5725,21 @@ function dateKey(ms: number): string {
   return `${y}-${m}-${day}`;
 }
 
+function monthKey(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
 function shortDateLabel(key: string): string {
   const d = new Date(`${key}T00:00:00`);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function monthLabel(key: string): string {
+  const d = new Date(`${key}-01T00:00:00`);
+  return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
 function formatDateTime(ms: number): string {
@@ -5787,6 +5820,7 @@ function buildUsageReport(
     .sort((a, b) => b.updatedMs - a.updatedMs);
 
   const bucketMap = new Map<string, UsageRollup>();
+  const monthMap = new Map<string, UsageRollup>();
   const projectMap = new Map<string, UsageRollup>();
   const modelMap = new Map<string, UsageRollup>();
   const totals: UsageRollup = {
@@ -5801,10 +5835,17 @@ function buildUsageReport(
 
   for (const row of rows) {
     const day = row.updatedMs ? dateKey(row.updatedMs) : "unknown";
+    const month = row.updatedMs ? monthKey(row.updatedMs) : "unknown";
     addUsage(
       bucketMap,
       day,
       day === "unknown" ? "Unknown" : shortDateLabel(day),
+      row,
+    );
+    addUsage(
+      monthMap,
+      month,
+      month === "unknown" ? "Unknown" : monthLabel(month),
       row,
     );
     addUsage(projectMap, row.cwd || "(unknown)", row.project, row);
@@ -5819,6 +5860,9 @@ function buildUsageReport(
   const buckets = Array.from(bucketMap.values()).sort((a, b) =>
     a.key.localeCompare(b.key),
   );
+  const months = Array.from(monthMap.values()).sort((a, b) =>
+    b.key.localeCompare(a.key),
+  );
   const projects = Array.from(projectMap.values()).sort(
     (a, b) => b.totalTokens - a.totalTokens || b.cost - a.cost,
   );
@@ -5832,6 +5876,7 @@ function buildUsageReport(
     includeArchived,
     totals,
     buckets,
+    months,
     projects,
     models,
     sessions: rows,
@@ -5847,7 +5892,11 @@ function csvLine(values: unknown[]): string {
   return values.map(csvCell).join(",");
 }
 
-function usageReportToCsv(report: UsageReport): string {
+function usageReportToCsv(
+  report: UsageReport,
+  history: UsageHistorySnapshot[],
+  budget: UsageBudget,
+): string {
   const lines: string[] = [];
   lines.push("summary");
   lines.push(
@@ -5893,6 +5942,30 @@ function usageReportToCsv(report: UsageReport): string {
         b.outputTokens,
         b.totalTokens,
         b.cost.toFixed(6),
+      ]),
+    );
+  }
+  lines.push("");
+  lines.push("monthly");
+  lines.push(
+    csvLine([
+      "month",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  for (const m of report.months) {
+    lines.push(
+      csvLine([
+        m.key,
+        m.sessions,
+        m.contextTokens,
+        m.outputTokens,
+        m.totalTokens,
+        m.cost.toFixed(6),
       ]),
     );
   }
@@ -5982,10 +6055,116 @@ function usageReportToCsv(report: UsageReport): string {
       ]),
     );
   }
+  lines.push("");
+  lines.push("history");
+  lines.push(
+    csvLine([
+      "date",
+      "generated_at",
+      "sessions",
+      "context_tokens",
+      "output_tokens",
+      "total_tokens",
+      "estimated_cost_usd",
+    ]),
+  );
+  for (const h of history) {
+    lines.push(
+      csvLine([
+        h.date,
+        h.generatedAt,
+        h.sessions,
+        h.contextTokens,
+        h.outputTokens,
+        h.totalTokens,
+        h.cost.toFixed(6),
+      ]),
+    );
+  }
+  lines.push("");
+  lines.push("budget");
+  lines.push(csvLine(["monthly_cost_usd", "monthly_tokens"]));
+  lines.push(csvLine([budget.monthlyCostUsd, budget.monthlyTokens]));
   return `${lines.join("\n")}\n`;
 }
 
-async function exportUsageReport(report: UsageReport, format: "json" | "csv") {
+function loadUsageHistory(): UsageHistorySnapshot[] {
+  try {
+    const raw = localStorage.getItem(USAGE_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is UsageHistorySnapshot => {
+        if (!item || typeof item !== "object") return false;
+        const row = item as Partial<UsageHistorySnapshot>;
+        return (
+          typeof row.date === "string" &&
+          typeof row.generatedAt === "string" &&
+          typeof row.sessions === "number" &&
+          typeof row.totalTokens === "number" &&
+          typeof row.cost === "number"
+        );
+      })
+      .slice(0, 180);
+  } catch {
+    return [];
+  }
+}
+
+function saveUsageHistory(history: UsageHistorySnapshot[]) {
+  localStorage.setItem(USAGE_HISTORY_KEY, JSON.stringify(history.slice(0, 180)));
+}
+
+function loadUsageBudget(): UsageBudget {
+  try {
+    const raw = localStorage.getItem(USAGE_BUDGET_KEY);
+    if (!raw) return { monthlyCostUsd: 0, monthlyTokens: 0 };
+    const parsed = JSON.parse(raw) as Partial<UsageBudget>;
+    return {
+      monthlyCostUsd: Math.max(0, Number(parsed.monthlyCostUsd) || 0),
+      monthlyTokens: Math.max(0, Number(parsed.monthlyTokens) || 0),
+    };
+  } catch {
+    return { monthlyCostUsd: 0, monthlyTokens: 0 };
+  }
+}
+
+function saveUsageBudget(budget: UsageBudget) {
+  localStorage.setItem(USAGE_BUDGET_KEY, JSON.stringify(budget));
+}
+
+function snapshotUsageReport(report: UsageReport): UsageHistorySnapshot {
+  return {
+    date: dateKey(Date.now()),
+    generatedAt: new Date().toISOString(),
+    sessions: report.totals.sessions,
+    contextTokens: report.totals.contextTokens,
+    outputTokens: report.totals.outputTokens,
+    totalTokens: report.totals.totalTokens,
+    cost: report.totals.cost,
+    topProjects: report.projects.slice(0, 8),
+    topModels: report.models.slice(0, 8),
+  };
+}
+
+function mergeUsageSnapshot(
+  history: UsageHistorySnapshot[],
+  snapshot: UsageHistorySnapshot,
+): UsageHistorySnapshot[] {
+  const next = [
+    snapshot,
+    ...history.filter((row) => row.date !== snapshot.date),
+  ].sort((a, b) => b.date.localeCompare(a.date));
+  return next.slice(0, 180);
+}
+
+async function exportUsageReport(
+  report: UsageReport,
+  format: "json" | "csv",
+  history: UsageHistorySnapshot[],
+  budget: UsageBudget,
+) {
   const stamp = new Date()
     .toISOString()
     .replace(/[:.]/g, "-")
@@ -6002,8 +6181,8 @@ async function exportUsageReport(report: UsageReport, format: "json" | "csv") {
   if (!chosen) return;
   const content =
     format === "json"
-      ? `${JSON.stringify(report, null, 2)}\n`
-      : usageReportToCsv(report);
+      ? `${JSON.stringify({ report, history, budget }, null, 2)}\n`
+      : usageReportToCsv(report, history, budget);
   await invoke("write_text_file", { path: chosen, content });
 }
 
@@ -6019,9 +6198,17 @@ function UsageDashboard({
   const [range, setRange] = useState<UsageRange>("30d");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
+  const [history, setHistory] = useState<UsageHistorySnapshot[]>(() =>
+    loadUsageHistory(),
+  );
+  const [budget, setBudget] = useState<UsageBudget>(() => loadUsageBudget());
   const report = useMemo(
     () => buildUsageReport(sessions, range, includeArchived),
     [sessions, range, includeArchived],
+  );
+  const allReport = useMemo(
+    () => buildUsageReport(sessions, "all", true),
+    [sessions],
   );
   const visibleBuckets = report.buckets.slice(-42);
   const maxBarValue =
@@ -6032,6 +6219,39 @@ function UsageDashboard({
   const topProjects = report.projects.slice(0, 12);
   const topModels = report.models.slice(0, 8);
   const topSessions = report.sessions.slice(0, 20);
+  const topMonths = report.months.slice(0, 8);
+  const historyRows = history.slice(0, 14);
+  const currentMonth = allReport.months.find((m) => m.key === monthKey(Date.now()));
+  const costBudgetPct =
+    budget.monthlyCostUsd > 0 && currentMonth
+      ? currentMonth.cost / budget.monthlyCostUsd
+      : 0;
+  const tokenBudgetPct =
+    budget.monthlyTokens > 0 && currentMonth
+      ? currentMonth.totalTokens / budget.monthlyTokens
+      : 0;
+  const budgetWarnings = [
+    budget.monthlyCostUsd > 0 && costBudgetPct >= 0.8
+      ? `Cost is ${(costBudgetPct * 100).toFixed(0)}% of monthly budget`
+      : "",
+    budget.monthlyTokens > 0 && tokenBudgetPct >= 0.8
+      ? `Tokens are ${(tokenBudgetPct * 100).toFixed(0)}% of monthly budget`
+      : "",
+  ].filter(Boolean);
+
+  useEffect(() => {
+    if (allReport.totals.sessions === 0) return;
+    const snapshot = snapshotUsageReport(allReport);
+    setHistory((prev) => {
+      const next = mergeUsageSnapshot(prev, snapshot);
+      saveUsageHistory(next);
+      return next;
+    });
+  }, [allReport]);
+
+  useEffect(() => {
+    saveUsageBudget(budget);
+  }, [budget]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -6045,7 +6265,9 @@ function UsageDashboard({
   }, [onClose]);
 
   const doExport = (format: "json" | "csv") => {
-    exportUsageReport(report, format).catch(notifyErr("usage export failed"));
+    exportUsageReport(report, format, history, budget).catch(
+      notifyErr("usage export failed"),
+    );
   };
   const refresh = () => {
     void onRefresh();
@@ -6122,6 +6344,51 @@ function UsageDashboard({
           </button>
         </div>
 
+        <section className="usage-budget">
+          <label>
+            <span>Monthly $ budget</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={budget.monthlyCostUsd || ""}
+              onChange={(e) =>
+                setBudget((prev) => ({
+                  ...prev,
+                  monthlyCostUsd: Math.max(0, Number(e.target.value) || 0),
+                }))
+              }
+              placeholder="none"
+            />
+          </label>
+          <label>
+            <span>Monthly token budget</span>
+            <input
+              type="number"
+              min="0"
+              step="1000"
+              value={budget.monthlyTokens || ""}
+              onChange={(e) =>
+                setBudget((prev) => ({
+                  ...prev,
+                  monthlyTokens: Math.max(0, Number(e.target.value) || 0),
+                }))
+              }
+              placeholder="none"
+            />
+          </label>
+          <div className="usage-budget-current">
+            This month: {formatTokens(currentMonth?.totalTokens ?? 0)} ·{" "}
+            {formatUsd(currentMonth?.cost ?? 0)}
+          </div>
+        </section>
+
+        {budgetWarnings.length > 0 && (
+          <div className="usage-budget-warning">
+            {budgetWarnings.join(" · ")}
+          </div>
+        )}
+
         <section className="usage-summary">
           <div className="usage-summary-card">
             <span>Tracked tokens</span>
@@ -6191,6 +6458,46 @@ function UsageDashboard({
 
         <div className="usage-columns">
           <section className="usage-section">
+            <h3>Monthly</h3>
+            <UsageRollupTable rows={topMonths} kind="month" />
+          </section>
+          <section className="usage-section">
+            <h3>Saved history</h3>
+            <div className="usage-table-wrap">
+              <table className="usage-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Sessions</th>
+                    <th>Tokens</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="usage-empty-cell">
+                        No saved history yet
+                      </td>
+                    </tr>
+                  ) : (
+                    historyRows.map((row) => (
+                      <tr key={row.date}>
+                        <td>{row.date}</td>
+                        <td>{row.sessions}</td>
+                        <td>{formatTokens(row.totalTokens)}</td>
+                        <td>{formatUsd(row.cost)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div className="usage-columns">
+          <section className="usage-section">
             <h3>Projects</h3>
             <UsageRollupTable rows={topProjects} kind="project" />
           </section>
@@ -6245,14 +6552,20 @@ function UsageRollupTable({
   kind,
 }: {
   rows: UsageRollup[];
-  kind: "project" | "model";
+  kind: "project" | "model" | "month";
 }) {
   return (
     <div className="usage-table-wrap">
       <table className="usage-table">
         <thead>
           <tr>
-            <th>{kind === "project" ? "Project" : "Model"}</th>
+            <th>
+              {kind === "project"
+                ? "Project"
+                : kind === "model"
+                ? "Model"
+                : "Month"}
+            </th>
             <th>Sessions</th>
             <th>Tokens</th>
             <th>Cost</th>

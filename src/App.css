@@ -1905,6 +1905,45 @@ body[data-resizing="true"] .terminal-resizer::after {
   flex: 1 1 auto;
 }
 
+.usage-budget {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.usage-budget label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.usage-budget input {
+  width: 110px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.usage-budget-current {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.usage-budget-warning {
+  padding: 8px 18px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
 .usage-summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -2097,6 +2136,10 @@ body[data-resizing="true"] .terminal-resizer::after {
     flex-wrap: wrap;
   }
 
+  .usage-budget {
+    flex-wrap: wrap;
+  }
+
   .usage-spacer {
     display: none;
   }
@@ -2133,6 +2176,8 @@ body[data-resizing="true"] .terminal-resizer::after {
   }
 
   .usage-range,
+  .usage-budget label,
+  .usage-budget input,
   .usage-toolbar .btn {
     width: 100%;
   }
