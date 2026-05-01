@@ -20,6 +20,8 @@
     "dev:web": "vite",
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build",
+    "build:native": "node scripts/tauri-build.mjs --local",
+    "build:native:signed": "node scripts/tauri-build.mjs --signed",
     "check": "npm run typecheck && cargo check --manifest-path src-tauri/Cargo.toml --locked",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -54,6 +54,8 @@ Other useful commands:
 ```sh
 npm run dev:web
 npm run build
+npm run build:native
+npm run build:native:signed
 npm run check
 npm run dev:desktop
 npm run tauri -- build
@@ -63,6 +65,11 @@ npm run tauri -- build
 Vite frontend in a browser, primarily for browser-only UI debugging. The dev
 desktop script picks an open port between 1420 and 1520 and passes it to both
 Tauri and Vite.
+
+Use `npm run build:native` for local `.app` / installer packaging. It disables
+Tauri updater artifacts so it does not require the private updater signing key.
+Use `npm run build:native:signed` for release-style builds; it requires
+`TAURI_SIGNING_PRIVATE_KEY` and produces updater artifacts.
 
 ## Downloads and Updates
 

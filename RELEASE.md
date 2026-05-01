@@ -25,7 +25,7 @@ release notes.
    npm run check
    TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/blackcrab-updater.key)" \
      TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-     env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 npm run tauri -- build
+     env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 npm run build:native:signed
    ```
 
 3. Update versions in:
@@ -56,6 +56,29 @@ release notes.
 10. Publish the draft release when the installers are good.
 
 The workflow can also be run manually from GitHub Actions with a tag input.
+
+## Local Native Builds
+
+Use the local native build command when you only need a testable `.app` and
+installer from the current checkout:
+
+```sh
+npm run build:native
+```
+
+That command passes a temporary Tauri config override that disables updater
+artifact creation. It should not require `TAURI_SIGNING_PRIVATE_KEY`.
+
+Use the signed build command for release-style artifacts:
+
+```sh
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/blackcrab-updater.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+  npm run build:native:signed
+```
+
+`build:native:signed` intentionally fails when `TAURI_SIGNING_PRIVATE_KEY` is
+missing, because release updater artifacts must be signed.
 
 ## Required GitHub Secrets
 
