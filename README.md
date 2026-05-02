@@ -90,6 +90,12 @@ https://github.com/BonJenn/blackcrab/releases/latest/download/latest.json
 See `RELEASE.md` for the full release, signing, notarization, and download
 tracking workflow.
 
+Blackcrab can send anonymous app and updater events to the landing site's
+analytics endpoint so release health can be measured by version. Events include
+app launch, update checks, update starts, update completions, and update
+failures. The install identifier is generated locally and hashed by the server
+before storage. Users can turn this off in Settings.
+
 ## How It Works
 
 The frontend is React and Vite. The desktop shell and native commands are Tauri

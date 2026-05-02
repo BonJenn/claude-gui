@@ -19,6 +19,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { TerminalInitialWrite } from "./Terminal";
@@ -253,6 +254,7 @@ type AppSettings = {
   notifyOnTurnComplete: boolean;
   autoCheckUpdates: boolean;
   autoOpenPreview: boolean;
+  analyticsEnabled: boolean;
   newPanelWorktreeMode: NewPanelWorktreeMode;
 };
 
@@ -275,6 +277,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   notifyOnTurnComplete: true,
   autoCheckUpdates: true,
   autoOpenPreview: true,
+  analyticsEnabled: true,
   newPanelWorktreeMode: "ask",
 };
 
@@ -410,6 +413,10 @@ function loadAppSettings(): AppSettings {
         typeof parsed.autoOpenPreview === "boolean"
           ? parsed.autoOpenPreview
           : DEFAULT_APP_SETTINGS.autoOpenPreview,
+      analyticsEnabled:
+        typeof parsed.analyticsEnabled === "boolean"
+          ? parsed.analyticsEnabled
+          : DEFAULT_APP_SETTINGS.analyticsEnabled,
       newPanelWorktreeMode: isNewPanelWorktreeMode(
         parsed.newPanelWorktreeMode,
       )
@@ -648,6 +655,80 @@ function isTauriRuntime(): boolean {
     typeof internals.invoke === "function" &&
     typeof internals.transformCallback === "function"
   );
+}
+
+type ProductEventType =
+  | "app_launch"
+  | "update_check"
+  | "update_started"
+  | "update_completed"
+  | "update_failed";
+
+const PRODUCT_EVENTS_URL = "https://www.blackcrab.app/api/events";
+const PRODUCT_EVENTS_INSTALL_ID_KEY = "blackcrab.analyticsInstallId";
+let appVersionPromise: Promise<string> | null = null;
+
+function detectAnalyticsPlatform() {
+  const text = `${navigator.platform ?? ""} ${navigator.userAgent ?? ""}`.toLowerCase();
+  if (text.includes("mac")) return "macos";
+  if (text.includes("win")) return "windows";
+  if (text.includes("linux")) return "linux";
+  return "unknown";
+}
+
+function getAnalyticsInstallId() {
+  try {
+    const existing = localStorage.getItem(PRODUCT_EVENTS_INSTALL_ID_KEY);
+    if (existing) return existing;
+
+    const id =
+      typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${randomId()}-${randomId()}`;
+    localStorage.setItem(PRODUCT_EVENTS_INSTALL_ID_KEY, id);
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+async function getAppVersion() {
+  if (!isTauriRuntime()) return "web";
+  if (!appVersionPromise) {
+    appVersionPromise = getVersion().catch(() => "unknown");
+  }
+  return appVersionPromise;
+}
+
+async function trackProductEvent(
+  eventType: ProductEventType,
+  payload: {
+    fromVersion?: string;
+    toVersion?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
+) {
+  if (!isTauriRuntime() || !loadAppSettings().analyticsEnabled) return;
+
+  try {
+    const currentVersion = await getAppVersion();
+    await fetch(PRODUCT_EVENTS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({
+        event_type: eventType,
+        platform: detectAnalyticsPlatform(),
+        current_version: currentVersion,
+        from_version: payload.fromVersion,
+        to_version: payload.toVersion,
+        anonymous_install_id: getAnalyticsInstallId(),
+        metadata: payload.metadata,
+      }),
+    });
+  } catch {
+    // Product analytics are best effort and must never affect the app.
+  }
 }
 
 function canUseTauriEventApi(): boolean {
@@ -1095,6 +1176,7 @@ function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>(() =>
     loadAppSettings(),
   );
+  const appLaunchTrackedRef = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cwd, setCwd] = useState<string>(() => appSettings.startupCwd);
   const [model, setModel] = useState<string>(() => appSettings.defaultModel);
@@ -1348,6 +1430,13 @@ function App() {
   useEffect(() => {
     saveAppSettings(appSettings);
   }, [appSettings]);
+
+  useEffect(() => {
+    if (!appSettings.analyticsEnabled || appLaunchTrackedRef.current) return;
+    appLaunchTrackedRef.current = true;
+    void trackProductEvent("app_launch");
+  }, [appSettings.analyticsEnabled]);
+
   const updateAppSettings = useCallback((patch: Partial<AppSettings>) => {
     setAppSettings((prev) => ({ ...prev, ...patch }));
   }, []);
@@ -2546,6 +2635,10 @@ function App() {
     setUpdateChecking(true);
     try {
       const update = await check();
+      void trackProductEvent("update_check", {
+        toVersion: update?.version,
+        metadata: { manual, available: Boolean(update) },
+      });
       if (update) {
         setAvailableUpdate(update);
         setUpdateDismissed(false);
@@ -2556,6 +2649,18 @@ function App() {
         notify("Blackcrab is up to date", "success");
       }
     } catch (e) {
+      void trackProductEvent("update_failed", {
+        metadata: {
+          manual,
+          stage: "check",
+          error:
+            typeof e === "string"
+              ? e
+              : e instanceof Error
+                ? e.message
+                : String(e),
+        },
+      });
       if (manual) {
         notifyErr("update check failed")(e);
       } else {
@@ -2579,11 +2684,32 @@ function App() {
     if (!availableUpdate || updateInstalling) return;
     setUpdateInstalling(true);
     try {
+      const fromVersion = await getAppVersion();
+      void trackProductEvent("update_started", {
+        fromVersion,
+        toVersion: availableUpdate.version,
+      });
       await availableUpdate.downloadAndInstall();
+      await trackProductEvent("update_completed", {
+        fromVersion,
+        toVersion: availableUpdate.version,
+      });
       notify("Update installed. Restarting Blackcrab...", "success");
       await relaunch();
     } catch (e) {
       setUpdateInstalling(false);
+      void trackProductEvent("update_failed", {
+        toVersion: availableUpdate.version,
+        metadata: {
+          stage: "install",
+          error:
+            typeof e === "string"
+              ? e
+              : e instanceof Error
+                ? e.message
+                : String(e),
+        },
+      });
       notifyErr("update install failed")(e);
     }
   }, [availableUpdate, updateInstalling]);
@@ -5640,6 +5766,16 @@ function SettingsModal({
                 }
               />
               <span>Auto-open local preview links</span>
+            </label>
+            <label className="settings-check-row">
+              <input
+                type="checkbox"
+                checked={settings.analyticsEnabled}
+                onChange={(e) =>
+                  onSettingsChange({ analyticsEnabled: e.target.checked })
+                }
+              />
+              <span>Share anonymous app and update analytics</span>
             </label>
           </section>
         </div>

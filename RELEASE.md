@@ -200,8 +200,11 @@ gh api repos/BonJenn/blackcrab/releases \
   --jq '.[] | {tag: .tag_name, assets: [.assets[] | {name, downloads: .download_count}]}'
 ```
 
-The landing site tracks download button clicks separately with Vercel Analytics.
-Use both numbers:
+The landing site tracks download button clicks separately with Vercel Analytics
+and records redirect/app updater events in its database when configured. Use all
+numbers together:
 
 - Landing analytics: how many users clicked download.
 - GitHub release counts: how many installer assets were actually downloaded.
+- Product analytics: how many app launches, update checks, started updates, and
+  completed updates happened by version.

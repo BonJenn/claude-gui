@@ -14,8 +14,14 @@ Blackcrab is designed as a local desktop app.
 Blackcrab sends messages to your local `claude` CLI subprocess. The CLI is
 responsible for any network requests to Anthropic or configured providers.
 
-Blackcrab does not operate a hosted backend, proxy Claude traffic, or ask for
-Anthropic credentials.
+Blackcrab does not proxy Claude traffic or ask for Anthropic credentials.
+
+If anonymous analytics are enabled, Blackcrab sends app launch and updater
+events to `https://www.blackcrab.app/api/events`. Those events include platform,
+current version, update target version when applicable, event type, and a
+locally generated anonymous install id. The server hashes that install id before
+storage. Prompts, transcripts, project paths, file contents, and Anthropic
+credentials are not included. This can be turned off in Settings.
 
 ## Local Storage
 
