@@ -530,10 +530,15 @@ async fn start_session(
 
     cmd.env("PATH", claude_path_env());
 
-    // If the user configured Blackcrab's reliability token, use it only for
-    // the child Claude process. Remove API-key auth from this spawn so a stale
-    // shell key cannot take precedence over the managed OAuth token.
+    // If Blackcrab can provide Claude OAuth auth, pass the freshest token only
+    // to the child process. A long-running app process can hold an older
+    // CLAUDE_CODE_OAUTH_TOKEN than the keychain after Terminal claude refreshes
+    // it, so prefer reading the current keychain token at spawn time.
     if let Ok(Some(token)) = read_blackcrab_claude_token() {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+        cmd.env_remove("ANTHROPIC_API_KEY");
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+    } else if let Some(token) = current_keychain_oauth_token() {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -2016,16 +2021,9 @@ fn refresh_oauth_via_curl(refresh_token: &str) -> Result<serde_json::Value, Stri
 }
 
 #[cfg(target_os = "macos")]
-fn hydrate_keychain_token() {
-    // Don't override anything the user already configured. Either of
-    // these vars short-circuits claude's auth flow and skips keychain.
-    if std::env::var_os("ANTHROPIC_API_KEY").is_some()
-        || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some()
-    {
-        return;
-    }
+fn current_keychain_oauth_token() -> Option<String> {
     let Some(creds) = read_keychain_credentials() else {
-        return;
+        return None;
     };
     let access_token = creds
         .pointer("/claudeAiOauth/accessToken")
@@ -2051,18 +2049,18 @@ fn hydrate_keychain_token() {
         expires_at == 0 || now_ms.saturating_add(60_000) >= expires_at;
 
     if !needs_refresh && !access_token.is_empty() {
-        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
-        return;
+        return Some(access_token);
     }
 
     if refresh_token.is_empty() {
         // No refresh token to use. Set whatever access token we have so
         // claude can produce a meaningful 401 → the UI can surface a
         // re-auth prompt rather than silent failure.
-        if !access_token.is_empty() {
-            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
-        }
-        return;
+        return if access_token.is_empty() {
+            None
+        } else {
+            Some(access_token)
+        };
     }
 
     match refresh_oauth_via_curl(&refresh_token) {
@@ -2081,10 +2079,11 @@ fn hydrate_keychain_token() {
                 .unwrap_or(0);
 
             if new_access.is_empty() {
-                if !access_token.is_empty() {
-                    std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
-                }
-                return;
+                return if access_token.is_empty() {
+                    None
+                } else {
+                    Some(access_token)
+                };
             }
 
             let new_expires_at_ms = now_ms + expires_in_s * 1000;
@@ -2106,16 +2105,38 @@ fn hydrate_keychain_token() {
             }
             let _ = write_keychain_credentials(&updated.to_string());
 
-            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", new_access);
+            Some(new_access.to_string())
         }
         Err(_) => {
             // Refresh failed (network, revoked, etc.). Fall back to
             // whatever we have so claude can produce a 401 the UI can
             // act on.
-            if !access_token.is_empty() {
-                std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+            if access_token.is_empty() {
+                None
+            } else {
+                Some(access_token)
             }
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_keychain_oauth_token() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn hydrate_keychain_token() {
+    // Don't override anything the user already configured. Either of
+    // these vars short-circuits claude's auth flow and skips keychain.
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some()
+        || std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some()
+        || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some()
+    {
+        return;
+    }
+    if let Some(token) = current_keychain_oauth_token() {
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
 }
 
