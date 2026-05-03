@@ -636,6 +636,20 @@ export function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+const SINGLE_PANEL_PREFIX = "single:";
+
+function singlePanelIdForSession(sessionId: string): string {
+  return `${SINGLE_PANEL_PREFIX}${sessionId}`;
+}
+
+function newSinglePanelId(): string {
+  return `${SINGLE_PANEL_PREFIX}new:${randomId()}`;
+}
+
+function isSinglePanelId(panelId: string | undefined): boolean {
+  return panelId === "main" || !!panelId?.startsWith(SINGLE_PANEL_PREFIX);
+}
+
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
   // The standalone web dev server is often opened at 127.0.0.1 from a
@@ -1477,22 +1491,27 @@ function App() {
     const handle = window.setTimeout(() => setStuckBusy(true), 60_000);
     return () => window.clearTimeout(handle);
   }, [busy, activityTick, activeSessionId]);
-  const setEntries = useCallback(
-    (update: Entry[] | ((prev: Entry[]) => Entry[])) => {
+  const setEntriesForTranscript = useCallback(
+    (transcriptId: string, update: Entry[] | ((prev: Entry[]) => Entry[])) => {
       setAllTranscripts((prev) => {
-        const id = activeSessionIdRef.current ?? NEW_SESSION_KEY;
-        const current = prev.get(id) ?? [];
+        const current = prev.get(transcriptId) ?? [];
         const newVal =
           typeof update === "function"
             ? (update as (p: Entry[]) => Entry[])(current)
             : update;
         if (newVal === current) return prev;
         const next = new Map(prev);
-        next.set(id, newVal);
+        next.set(transcriptId, newVal);
         return next;
       });
     },
     [],
+  );
+  const setEntries = useCallback(
+    (update: Entry[] | ((prev: Entry[]) => Entry[])) => {
+      setEntriesForTranscript(activeSessionIdRef.current ?? NEW_SESSION_KEY, update);
+    },
+    [setEntriesForTranscript],
   );
   const updateEntryInTranscript = useCallback(
     (
@@ -1824,10 +1843,21 @@ function App() {
       setAllTranscripts((prev) => {
         if (prev.size <= MAX_KEPT) return prev;
         const id = activeSessionIdRef.current ?? NEW_SESSION_KEY;
+        const liveTranscriptIds = new Set<string>();
+        for (const [panelId, transcriptId] of panelTranscriptIdsRef.current) {
+          if (
+            panelOnRef.current.get(panelId) ||
+            panelBusyRef.current.get(panelId)
+          ) {
+            liveTranscriptIds.add(transcriptId);
+          }
+        }
         const next = new Map(prev);
         for (const k of Array.from(next.keys())) {
           if (next.size <= MAX_KEPT) break;
-          if (k === id || k === NEW_SESSION_KEY) continue;
+          if (k === id || k === NEW_SESSION_KEY || liveTranscriptIds.has(k)) {
+            continue;
+          }
           next.delete(k);
         }
         return next;
@@ -1873,10 +1903,11 @@ function App() {
     }
   }, [gridMode, gridPanels, selectedGridPanelId]);
 
-  // Single mode uses backend panel id "main"; grid tiles use their own
-  // panel ids. Before mounting a grid tile for the active single-mode
-  // session, pause that tile and stop "main" so the backend single-writer
-  // gate never sees two owners for the same JSONL.
+  // Single mode now uses one backend panel id per conversation, while
+  // grid tiles use their own panel ids. Before mounting a grid tile for
+  // the active single-mode session, pause that tile and stop its single
+  // panel so the backend single-writer gate never sees two owners for
+  // the same JSONL.
   const [gridHandoffSessionIds, setGridHandoffSessionIds] = useState<string[]>(
     [],
   );
@@ -1974,9 +2005,14 @@ function App() {
 
     let cancelled = false;
     (async () => {
-      await invoke("stop_session", { panelId: "main" }).catch(() => {});
+      const panelId =
+        sid
+          ? sessionPanelIdsRef.current.get(sid) ?? activePanelIdRef.current
+          : activePanelIdRef.current;
+      await invoke("stop_session", { panelId }).catch(() => {});
       if (cancelled) return;
-      setSessionOn(false);
+      setPanelOn(panelId, false);
+      setPanelBusy(panelId, false);
       setActiveSessionId(undefined);
       clearGridHandoffs();
     })();
@@ -2427,11 +2463,85 @@ function App() {
   const resumeTokenRef = useRef(0);
   const sidebarResumeSeqRef = useRef(0);
 
-  // In-flight start_session promise. resumeSession kicks one off in the
-  // background and stores it here; send/sendQuickReply await it before
-  // dispatching send_message so the visible session click doesn't block
-  // on subprocess boot. Cleared once the promise settles.
+  // Latest in-flight start_session promise for the active single panel.
+  // Per-panel promises live in panelStartPromisesRef; this ref remains
+  // as a cheap active-session mirror for diagnostics and cleanup.
   const startPromiseRef = useRef<Promise<unknown> | null>(null);
+  const activePanelIdRef = useRef<string>(newSinglePanelId());
+  const panelTranscriptIdsRef = useRef<Map<string, string>>(
+    new Map([[activePanelIdRef.current, NEW_SESSION_KEY]]),
+  );
+  const sessionPanelIdsRef = useRef<Map<string, string>>(new Map());
+  const panelOnRef = useRef<Map<string, boolean>>(new Map());
+  const panelBusyRef = useRef<Map<string, boolean>>(new Map());
+  const panelStartPromisesRef = useRef<Map<string, Promise<unknown>>>(
+    new Map(),
+  );
+  const panelStreamingIdsRef = useRef<Map<string, string | null>>(new Map());
+  const panelCwdsRef = useRef<Map<string, string>>(new Map());
+  const panelModelsRef = useRef<Map<string, string>>(new Map());
+  const panelPermissionModesRef = useRef<Map<string, string>>(new Map());
+  const panelSessionMetaRef = useRef<
+    Map<
+      string,
+      {
+        sessionId?: string;
+        model?: string;
+        cwd?: string;
+        tools?: string[];
+      }
+    >
+  >(new Map());
+  const panelPendingPermissionsRef = useRef<
+    Map<string, PermissionRequest | null>
+  >(new Map());
+  const panelPendingDenialsRef = useRef<
+    Map<string, Array<{ tool_name: string; tool_input?: unknown }> | null>
+  >(new Map());
+  const transcriptToolUseMapsRef = useRef<Map<string, Map<string, ToolMeta>>>(
+    new Map(),
+  );
+  const ensureTranscriptToolUseMap = useCallback((transcriptId: string) => {
+    let map = transcriptToolUseMapsRef.current.get(transcriptId);
+    if (!map) {
+      map = new Map<string, ToolMeta>();
+      transcriptToolUseMapsRef.current.set(transcriptId, map);
+      setToolUseMapForPanel(transcriptId, map);
+    }
+    return map;
+  }, []);
+  const setActiveToolUseMap = useCallback(
+    (transcriptId: string) => {
+      const map = ensureTranscriptToolUseMap(transcriptId);
+      toolUseMapRef.current = map;
+      toolUseMapGlobal.current = map;
+    },
+    [ensureTranscriptToolUseMap],
+  );
+  const setPanelOn = useCallback((panelId: string, on: boolean) => {
+    panelOnRef.current.set(panelId, on);
+    if (activePanelIdRef.current === panelId) setSessionOn(on);
+  }, []);
+  const setPanelBusy = useCallback((panelId: string, isBusy: boolean) => {
+    panelBusyRef.current.set(panelId, isBusy);
+    if (activePanelIdRef.current === panelId) setBusy(isBusy);
+  }, []);
+  const syncActivePanelState = useCallback((panelId: string) => {
+    setSessionOn(!!panelOnRef.current.get(panelId));
+    setBusy(!!panelBusyRef.current.get(panelId));
+    setSessionMeta(panelSessionMetaRef.current.get(panelId) ?? null);
+    setPendingPermission(panelPendingPermissionsRef.current.get(panelId) ?? null);
+    setPendingDenials(panelPendingDenialsRef.current.get(panelId) ?? null);
+  }, []);
+  const activateSinglePanel = useCallback(
+    (panelId: string, transcriptId: string) => {
+      activePanelIdRef.current = panelId;
+      panelTranscriptIdsRef.current.set(panelId, transcriptId);
+      setActiveToolUseMap(transcriptId);
+      syncActivePanelState(panelId);
+    },
+    [setActiveToolUseMap, syncActivePanelState],
+  );
   const transcriptScrollSeqRef = useRef(0);
   const [transcriptScrollRequest, setTranscriptScrollRequest] = useState<{
     sessionId: string;
@@ -3055,7 +3165,8 @@ function App() {
     if (!canUseTauriEventApi()) return;
     const pending: Promise<() => void>[] = [
       listen<{ panel_id: string; line: string }>("claude-event", (e) => {
-        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const panelId = e.payload?.panel_id ?? "main";
+        if (!isSinglePanelId(panelId)) return;
         const line = e.payload?.line;
         if (typeof line !== "string") return;
         // Any event from the subprocess counts as activity for the
@@ -3064,13 +3175,14 @@ function App() {
         setActivityTick((n) => n + 1);
         try {
           const ev = JSON.parse(line) as StreamEvent;
-          handleEvent(ev);
+          handleEvent(ev, panelId);
         } catch (err) {
           console.error("bad claude-event payload", err, line);
         }
       }),
       listen<{ panel_id: string; line: string }>("claude-stderr", (e) => {
-        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const panelId = e.payload?.panel_id ?? "main";
+        if (!isSinglePanelId(panelId)) return;
         const line = e.payload?.line ?? "";
         if (!line) return;
         // stderr counts too — claude logs progress there during long
@@ -3080,11 +3192,14 @@ function App() {
         // many turns and surfaces "fatal: not a git repository" when
         // the cwd isn't tracked — not actionable, just clutter.
         if (isBenignStderr(line)) return;
-        setStderrLines((s) => [...s, line]);
+        if (activePanelIdRef.current === panelId) {
+          setStderrLines((s) => [...s, line]);
+        }
         if (isAuthErrorText(line)) setAuthErrorSeen(true);
       }),
       listen<{ panel_id: string }>("claude-done", (e) => {
-        if (e.payload?.panel_id && e.payload.panel_id !== "main") return;
+        const panelId = e.payload?.panel_id ?? "main";
+        if (!isSinglePanelId(panelId)) return;
         // Ignore the done event from a subprocess we just killed to switch
         // to another session; otherwise the transcript flickers a spurious
         // "session ended" message.
@@ -3092,9 +3207,13 @@ function App() {
           refreshSessions();
           return;
         }
-        setSessionOn(false);
-        setBusy(false);
-        setEntries((es) => [
+        setPanelOn(panelId, false);
+        setPanelBusy(panelId, false);
+        const transcriptId =
+          panelTranscriptIdsRef.current.get(panelId) ??
+          activeSessionIdRef.current ??
+          NEW_SESSION_KEY;
+        setEntriesForTranscript(transcriptId, (es) => [
           ...es,
           { kind: "system", id: randomId(), text: "session ended" },
         ]);
@@ -3110,61 +3229,99 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function recordToolUses(blocks: Block[]) {
+  function transcriptIdForPanel(panelId: string): string {
+    return (
+      panelTranscriptIdsRef.current.get(panelId) ??
+      activeSessionIdRef.current ??
+      NEW_SESSION_KEY
+    );
+  }
+
+  function recordToolUses(blocks: Block[], transcriptId: string) {
+    const map = ensureTranscriptToolUseMap(transcriptId);
     for (const b of blocks) {
       if (b.type === "tool_use") {
         const tu = b as ToolUseBlock;
         if (tu.id && tu.name) {
-          toolUseMapRef.current.set(tu.id, { name: tu.name, input: tu.input });
+          map.set(tu.id, { name: tu.name, input: tu.input });
         }
       }
     }
   }
 
-  function handleEvent(ev: StreamEvent) {
+  function handleEvent(ev: StreamEvent, panelId: string) {
+    const transcriptId = transcriptIdForPanel(panelId);
+    const isActivePanel = activePanelIdRef.current === panelId;
+    const panelCwd = panelCwdsRef.current.get(panelId) || cwd;
     const any = ev as Record<string, unknown>;
     if (any.type === "control_request") {
       const req = any.request as Record<string, unknown> | undefined;
       if (req && req.subtype === "can_use_tool") {
-        const sid = activeSessionIdRef.current;
-        markSessionActivity(sid, "waiting", "permission needed");
-        requestSidebarSessionTop(sid);
-        setPendingPermission({
+        const sid =
+          transcriptId !== NEW_SESSION_KEY
+            ? transcriptId
+            : activeSessionIdRef.current;
+        const pending = {
           requestId: String(any.request_id ?? ""),
           toolName: String(req.tool_name ?? "unknown"),
           input: req.input,
-        });
+        };
+        markSessionActivity(sid, "waiting", "permission needed");
+        requestSidebarSessionTop(sid);
+        panelPendingPermissionsRef.current.set(panelId, pending);
+        if (isActivePanel) setPendingPermission(pending);
       }
       return;
     }
     if (ev.type === "system" && ev.subtype === "init") {
-      setSessionMeta({
+      const meta = {
         sessionId: ev.session_id,
         model: ev.model,
         cwd: ev.cwd,
         tools: ev.tools,
-      });
+      };
+      panelSessionMetaRef.current.set(panelId, meta);
+      if (ev.cwd) panelCwdsRef.current.set(panelId, ev.cwd);
+      if (ev.model) panelModelsRef.current.set(panelId, ev.model);
+      setPanelOn(panelId, true);
+      if (isActivePanel) setSessionMeta(meta);
       const newId = ev.session_id;
       // When the user just sent their first message, it sits in the
       // NEW_SESSION_KEY scratch slot. Fold it into the real session
       // slot now that claude has assigned an id, so it doesn't orphan
       // once the scratch slot resets.
       if (newId) {
+        sessionPanelIdsRef.current.set(newId, panelId);
+        panelTranscriptIdsRef.current.set(panelId, newId);
+        const existingMap = transcriptToolUseMapsRef.current.get(transcriptId);
+        if (existingMap && !transcriptToolUseMapsRef.current.has(newId)) {
+          transcriptToolUseMapsRef.current.set(newId, existingMap);
+          setToolUseMapForPanel(newId, existingMap);
+        }
+        if (isActivePanel) setActiveToolUseMap(newId);
         setAllTranscripts((prev) => {
-          const scratch = prev.get(NEW_SESSION_KEY) ?? [];
+          const scratch =
+            transcriptId === NEW_SESSION_KEY
+              ? prev.get(NEW_SESSION_KEY) ?? []
+              : [];
           if (scratch.length === 0 && prev.has(newId)) return prev;
           const next = new Map(prev);
           const existing = next.get(newId) ?? [];
-          next.set(newId, [...scratch, ...existing]);
-          next.set(NEW_SESSION_KEY, []);
+          if (scratch.length > 0) {
+            next.set(newId, [...scratch, ...existing]);
+            next.set(NEW_SESSION_KEY, []);
+          } else if (!next.has(newId)) {
+            next.set(newId, existing);
+          }
           return next;
         });
       }
-      setActiveSessionId(newId);
+      if (isActivePanel) setActiveSessionId(newId);
       if (newId && pendingSidebarEngagementRef.current) {
         requestSidebarEngagementTop(newId);
       }
-      setEntries((es) => [
+      const targetTranscriptId = newId || transcriptId;
+      setEntriesForTranscript(targetTranscriptId, (es) => [
         ...es,
         {
           kind: "system",
@@ -3180,25 +3337,33 @@ function App() {
 
     if (ev.type === "assistant") {
       const msgId = ev.message.id;
-      const repo = githubRepoCache.get(cwd) || "";
+      const repo = githubRepoCache.get(panelCwd) || "";
       const blocks = ev.message.content.map((b): Block => {
         if (b.type === "text") {
           const tb = b as TextBlock;
-          return { ...tb, _html: compileMarkdown(tb.text ?? "", repo) };
+          return {
+            ...tb,
+            _repo: repo || undefined,
+            _html: compileMarkdown(tb.text ?? "", repo),
+          };
         }
         if (b.type === "thinking") {
           const thb = b as ThinkingBlock;
-          return { ...thb, _html: compileMarkdown(thb.thinking ?? "", repo) };
+          return {
+            ...thb,
+            _repo: repo || undefined,
+            _html: compileMarkdown(thb.thinking ?? "", repo),
+          };
         }
         return b;
       });
-      recordToolUses(blocks);
+      recordToolUses(blocks, transcriptId);
       for (const b of blocks) {
-        if (b.type === "text") {
+        if (isActivePanel && b.type === "text") {
           autoDetectUrl((b as TextBlock).text ?? "");
         }
       }
-      setEntries((es) => {
+      setEntriesForTranscript(transcriptId, (es) => {
         const idx = es.findIndex(
           (x) => x.kind === "assistant" && x.id === msgId,
         );
@@ -3216,7 +3381,7 @@ function App() {
     }
 
     if (ev.type === "stream_event") {
-      handlePartial(ev.event);
+      handlePartial(ev.event, panelId, transcriptId);
       return;
     }
 
@@ -3224,7 +3389,7 @@ function App() {
       const content = ev.message.content;
       if (typeof content === "string") {
         if (content.trim()) {
-          setEntries((es) => [
+          setEntriesForTranscript(transcriptId, (es) => [
             ...es,
             { kind: "user", id: randomId(), text: content },
           ]);
@@ -3244,7 +3409,7 @@ function App() {
                 : tr.content
                     .map((p) => (p.type === "text" ? p.text ?? "" : ""))
                     .join(" ");
-            autoDetectUrl(resultText);
+            if (isActivePanel) autoDetectUrl(resultText);
             toolResults.push({
               kind: "tool_result",
               id: randomId(),
@@ -3255,28 +3420,33 @@ function App() {
           }
         }
         if (textParts.length) {
-          setEntries((es) => [
+          setEntriesForTranscript(transcriptId, (es) => [
             ...es,
             { kind: "user", id: randomId(), text: textParts.join("\n") },
           ]);
         }
         if (toolResults.length) {
-          setEntries((es) => [...es, ...toolResults]);
+          setEntriesForTranscript(transcriptId, (es) => [...es, ...toolResults]);
         }
       }
       return;
     }
 
     if (ev.type === "result") {
-      const sid = ev.session_id ?? activeSessionIdRef.current;
+      const sid =
+        ev.session_id ??
+        (transcriptId !== NEW_SESSION_KEY
+          ? transcriptId
+          : activeSessionIdRef.current);
       markSessionActivity(
         sid,
         ev.is_error ? "error" : "done",
         ev.is_error ? "turn errored" : "turn complete",
       );
       requestSidebarSessionTop(sid);
-      setBusy(false);
-      streamingIdRef.current = null;
+      setPanelBusy(panelId, false);
+      panelStreamingIdsRef.current.set(panelId, null);
+      if (isActivePanel) streamingIdRef.current = null;
       const cost = ev.total_cost_usd != null ? ` • $${ev.total_cost_usd.toFixed(4)}` : "";
       const dur = ev.duration_ms != null ? ` • ${(ev.duration_ms / 1000).toFixed(1)}s` : "";
       // Claude surfaces the real failure reason in one of several places
@@ -3297,25 +3467,25 @@ function App() {
         ev.is_error && errorDetail
           ? `error • ${errorDetail}${cost}${dur}`
           : `${ev.subtype}${cost}${dur}`;
-      setEntries((es) => [
+      setEntriesForTranscript(transcriptId, (es) => [
         ...es,
         { kind: "result", id: randomId(), text, isError: ev.is_error },
       ]);
-      if (ev.is_error) {
+      if (ev.is_error && isActivePanel) {
         setShowStderr(true);
       }
       // Fire a native notification so the user doesn't have to watch
       // the window while a long turn runs. Uses the latest assistant
       // text as the body (first 240 chars).
       (() => {
-        const info = activeSessionIdRef.current
-          ? sessions.find((s) => s.id === activeSessionIdRef.current)
+        const notifySessionId =
+          sid && sid !== NEW_SESSION_KEY ? sid : activeSessionIdRef.current;
+        const info = notifySessionId
+          ? sessions.find((s) => s.id === notifySessionId)
           : undefined;
         const title = info?.title || "Claude";
         let body = "";
-        const es = allTranscripts.get(
-          activeSessionIdRef.current ?? NEW_SESSION_KEY,
-        );
+        const es = allTranscripts.get(transcriptId);
         if (es) {
           for (let i = es.length - 1; i >= 0; i--) {
             const e = es[i];
@@ -3349,7 +3519,10 @@ function App() {
               typeof (d as { tool_name?: unknown }).tool_name === "string",
           )
           .map((d) => ({ tool_name: d.tool_name, tool_input: d.tool_input }));
-        if (parsed.length > 0) setPendingDenials(parsed);
+        if (parsed.length > 0) {
+          panelPendingDenialsRef.current.set(panelId, parsed);
+          if (isActivePanel) setPendingDenials(parsed);
+        }
       }
       return;
     }
@@ -3358,10 +3531,13 @@ function App() {
     // API call itself fails. Surface them clearly.
     const evAny = ev as { type?: string; error?: unknown; message?: unknown };
     if (evAny.type === "error") {
-      const sid = activeSessionIdRef.current;
+      const sid =
+        transcriptId !== NEW_SESSION_KEY
+          ? transcriptId
+          : activeSessionIdRef.current;
       markSessionActivity(sid, "error", "API error");
       requestSidebarSessionTop(sid);
-      setBusy(false);
+      setPanelBusy(panelId, false);
       const errObj = evAny.error as { message?: string; type?: string } | string | undefined;
       const msg =
         typeof errObj === "string"
@@ -3369,11 +3545,11 @@ function App() {
           : errObj?.message ?? (typeof evAny.message === "string" ? evAny.message : "unknown error");
       const errType =
         typeof errObj === "object" ? (errObj?.type ?? "") : "";
-      setEntries((es) => [
+      setEntriesForTranscript(transcriptId, (es) => [
         ...es,
         { kind: "system", id: randomId(), text: `API error: ${msg}` },
       ]);
-      setShowStderr(true);
+      if (isActivePanel) setShowStderr(true);
       if (errType === "authentication_error" || isAuthErrorText(msg)) {
         setAuthErrorSeen(true);
       }
@@ -3381,23 +3557,29 @@ function App() {
     }
   }
 
-  function handlePartial(e: PartialEvent) {
+  function handlePartial(
+    e: PartialEvent,
+    panelId: string,
+    transcriptId: string,
+  ) {
+    const isActivePanel = activePanelIdRef.current === panelId;
     if (e.type === "message_start") {
       const msgId = (e as { message: { id: string } }).message?.id;
       if (!msgId) return;
-      streamingIdRef.current = msgId;
-      setEntries((es) => {
+      panelStreamingIdsRef.current.set(panelId, msgId);
+      if (isActivePanel) streamingIdRef.current = msgId;
+      setEntriesForTranscript(transcriptId, (es) => {
         if (es.some((x) => x.kind === "assistant" && x.id === msgId)) return es;
         return [...es, { kind: "assistant", id: msgId, blocks: [] }];
       });
       return;
     }
 
-    const msgId = streamingIdRef.current;
+    const msgId = panelStreamingIdsRef.current.get(panelId);
     if (!msgId) return;
 
     const updateBlocks = (fn: (blocks: Block[]) => Block[]) => {
-      setEntries((es) =>
+      setEntriesForTranscript(transcriptId, (es) =>
         es.map((x) =>
           x.kind === "assistant" && x.id === msgId
             ? { ...x, blocks: fn(x.blocks) }
@@ -3461,6 +3643,9 @@ function App() {
 
     if (e.type === "content_block_stop") {
       const se = e as { index: number };
+      const panelCwd = panelCwdsRef.current.get(panelId) || cwd;
+      const repo = githubRepoCache.get(panelCwd) || "";
+      const toolUseMap = ensureTranscriptToolUseMap(transcriptId);
       updateBlocks((blocks) => {
         const next = blocks.slice();
         const b = next[se.index] as Block | undefined;
@@ -3471,12 +3656,14 @@ function App() {
         if (cleaned.type === "text") {
           const tb = cleaned as TextBlock;
           delete tb._streaming;
-          tb._html = compileMarkdown(tb.text ?? "", githubRepoCache.get(cwd) || "");
+          tb._repo = repo || undefined;
+          tb._html = compileMarkdown(tb.text ?? "", repo);
         }
         if (cleaned.type === "thinking") {
           const thb = cleaned as ThinkingBlock;
           delete thb._streaming;
-          thb._html = compileMarkdown(thb.thinking ?? "", githubRepoCache.get(cwd) || "");
+          thb._repo = repo || undefined;
+          thb._html = compileMarkdown(thb.thinking ?? "", repo);
         }
         if (cleaned.type === "tool_use") {
           const tu = cleaned as ToolUseBlock;
@@ -3489,7 +3676,7 @@ function App() {
             delete tu._inputJson;
           }
           if (tu.id && tu.name) {
-            toolUseMapRef.current.set(tu.id, { name: tu.name, input: tu.input });
+            toolUseMap.set(tu.id, { name: tu.name, input: tu.input });
           }
         }
         next[se.index] = cleaned;
@@ -3499,9 +3686,60 @@ function App() {
     }
 
     if (e.type === "message_stop") {
-      streamingIdRef.current = null;
+      panelStreamingIdsRef.current.set(panelId, null);
+      if (isActivePanel) streamingIdRef.current = null;
       return;
     }
+  }
+
+  async function startPanelSession({
+    panelId,
+    panelCwd,
+    panelPermissionMode,
+    panelModel,
+    resumeId,
+    useWorktree,
+  }: {
+    panelId: string;
+    panelCwd: string;
+    panelPermissionMode: string;
+    panelModel: string | null;
+    resumeId: string | null;
+    useWorktree?: boolean;
+  }) {
+    const existing = panelStartPromisesRef.current.get(panelId);
+    if (existing) return existing;
+    if (panelOnRef.current.get(panelId)) return Promise.resolve();
+
+    panelCwdsRef.current.set(panelId, panelCwd);
+    panelPermissionModesRef.current.set(panelId, panelPermissionMode);
+    if (panelModel) panelModelsRef.current.set(panelId, panelModel);
+    const startPromise = invoke("start_session", {
+      panelId,
+      cwd: panelCwd,
+      permissionMode: panelPermissionMode,
+      model: panelModel,
+      resumeId,
+      useWorktree: !!useWorktree,
+    });
+    panelStartPromisesRef.current.set(panelId, startPromise);
+    if (activePanelIdRef.current === panelId) startPromiseRef.current = startPromise;
+    startPromise
+      .then(() => {
+        setPanelOn(panelId, true);
+      })
+      .catch(() => {
+        setPanelOn(panelId, false);
+      })
+      .finally(() => {
+        if (panelStartPromisesRef.current.get(panelId) === startPromise) {
+          panelStartPromisesRef.current.delete(panelId);
+        }
+        if (startPromiseRef.current === startPromise) {
+          startPromiseRef.current = null;
+        }
+      });
+    return startPromise;
   }
 
   async function pickDirectory() {
@@ -3517,13 +3755,26 @@ function App() {
     // Switch to the scratch slot first so the ref mirrored inside
     // setEntries doesn't still point at the session we're leaving —
     // otherwise setEntries([]) below would wipe the kept-alive copy.
+    const panelId = newSinglePanelId();
+    activePanelIdRef.current = panelId;
+    panelTranscriptIdsRef.current.set(panelId, NEW_SESSION_KEY);
+    const scratchToolUseMap = new Map<string, ToolMeta>();
+    transcriptToolUseMapsRef.current.set(NEW_SESSION_KEY, scratchToolUseMap);
+    setToolUseMapForPanel(NEW_SESSION_KEY, scratchToolUseMap);
+    toolUseMapRef.current = scratchToolUseMap;
+    toolUseMapGlobal.current = scratchToolUseMap;
     setActiveSessionId(undefined);
-    setEntries([]);
+    setEntriesForTranscript(NEW_SESSION_KEY, []);
     setStderrLines([]);
-    toolUseMapRef.current.clear();
-    toolUseMapGlobal.current = toolUseMapRef.current;
     streamingIdRef.current = null;
+    panelStreamingIdsRef.current.set(panelId, null);
+    panelPendingPermissionsRef.current.set(panelId, null);
+    panelPendingDenialsRef.current.set(panelId, null);
+    panelSessionMetaRef.current.delete(panelId);
+    setSessionOn(false);
     setBusy(false);
+    setPendingPermission(null);
+    setPendingDenials(null);
     setSessionMeta(null);
     setStuckToBottom(true);
     setHasNewBelow(false);
@@ -3541,7 +3792,7 @@ function App() {
       await addNewGridPanel();
       return;
     }
-    if (sessionOn) {
+    if (sessionOn && !busy) {
       switchingSessionRef.current = true;
       try {
         await stopSession();
@@ -3558,7 +3809,7 @@ function App() {
   async function startNewSessionInProject(projectCwd: string) {
     const targetCwd = projectCwd.trim();
     if (!targetCwd) return;
-    if (sessionOn) {
+    if (sessionOn && !busy) {
       switchingSessionRef.current = true;
       try {
         await stopSession();
@@ -3687,7 +3938,15 @@ function App() {
   }
 
   async function resumeSession(sessionId: string, sessionCwd: string) {
-    if (activeSessionIdRef.current === sessionId && sessionOn) {
+    const panelId =
+      sessionPanelIdsRef.current.get(sessionId) ??
+      singlePanelIdForSession(sessionId);
+    sessionPanelIdsRef.current.set(sessionId, panelId);
+    panelTranscriptIdsRef.current.set(panelId, sessionId);
+    if (sessionCwd) panelCwdsRef.current.set(panelId, sessionCwd);
+
+    if (activeSessionIdRef.current === sessionId && panelOnRef.current.get(panelId)) {
+      activateSinglePanel(panelId, sessionId);
       ackSessionActivity(sessionId);
       setSidebarSelectedSessionId(sessionId);
       return;
@@ -3718,27 +3977,29 @@ function App() {
     const cacheHit = !!cached && cached.entries.length > 0;
     log(`cache=${cacheHit ? "HIT" : "MISS"} entries=${cached?.entries.length ?? 0}`);
 
+    const cachedToolUseMap = cached?.toolUseMap;
+    if (cachedToolUseMap && !transcriptToolUseMapsRef.current.has(sessionId)) {
+      const map = new Map(cachedToolUseMap);
+      transcriptToolUseMapsRef.current.set(sessionId, map);
+      setToolUseMapForPanel(sessionId, map);
+    }
+
     const applyResumeState = () => {
-      switchingSessionRef.current = true;
+      activateSinglePanel(panelId, sessionId);
       if (sessionModel) setModel(sessionModel);
       if (sessionPermissionMode) setPermissionMode(sessionPermissionMode);
-      setSessionOn(false);
       setActiveSessionId(sessionId);
       if (sessionCwd) setCwd(sessionCwd);
       setStderrLines([]);
-      setSessionMeta(null);
-      setBusy(false);
       setStuckToBottom(true);
       setHasNewBelow(false);
       setPreviewOpen(false);
       setPreviewUrl("");
       seenUrlsRef.current.clear();
-      streamingIdRef.current = null;
+      streamingIdRef.current = panelStreamingIdsRef.current.get(panelId) ?? null;
     };
 
     if (cacheHit) {
-      toolUseMapRef.current = new Map(cached!.toolUseMap);
-      toolUseMapGlobal.current = toolUseMapRef.current;
       // If this session's transcript is already in the keep-alive map
       // from an earlier visit, skip replacing its entries — swapping
       // them would force React to diff + tear down its DOM, undoing
@@ -3763,8 +4024,11 @@ function App() {
       });
       scrollTranscriptToBottomNow();
     } else {
-      toolUseMapRef.current = new Map();
-      toolUseMapGlobal.current = toolUseMapRef.current;
+      const map = new Map<string, ToolMeta>();
+      transcriptToolUseMapsRef.current.set(sessionId, map);
+      setToolUseMapForPanel(sessionId, map);
+      toolUseMapRef.current = map;
+      toolUseMapGlobal.current = map;
       flushSync(() => {
         applyResumeState();
         setEntries([]);
@@ -3774,35 +4038,32 @@ function App() {
 
     const useCwd = sessionCwd || cwd;
 
-    // Start the claude subprocess in the background. On a cold cache,
-    // gate that start until after the transcript tail has loaded and
-    // rendered; CLI startup can take seconds, and it should never sit
-    // in front of showing already-saved conversation history. send()
-    // still awaits startPromiseRef before dispatching send_message.
+    // Start this conversation's subprocess in the background. On a cold
+    // cache, gate that start until after the transcript tail has loaded
+    // and rendered; CLI startup can take seconds, and it should never sit
+    // in front of showing already-saved conversation history.
     let releaseStartGate: () => void = () => {};
     const startGate = cacheHit
       ? Promise.resolve()
       : new Promise<void>((resolve) => {
           releaseStartGate = resolve;
         });
-    const startPromise = (async () => {
+    const activeStartPromise = (async () => {
       await startGate;
       if (!isLatest()) return;
       // setPermissionMode above hasn't flushed yet, so send the
       // session's own permission mode to start_session directly.
-      await invoke("start_session", {
-        panelId: "main",
-        cwd: useCwd,
-        permissionMode: sessionPermissionMode || permissionMode,
-        model: sessionModel || model || null,
+      await startPanelSession({
+        panelId,
+        panelCwd: useCwd,
+        panelPermissionMode: sessionPermissionMode || permissionMode,
+        panelModel: sessionModel || model || null,
         resumeId: sessionId,
       });
     })();
-    startPromiseRef.current = startPromise;
-    // Optimistic flip — sessionOn becomes the "ready to chat" indicator
-    // immediately. send() will still await the start promise before any
-    // send_message, so we never dispatch into a non-existent subprocess.
-    setSessionOn(true);
+    if (activePanelIdRef.current === panelId) {
+      startPromiseRef.current = activeStartPromise;
+    }
     setTimeout(() => inputRef.current?.focus(), 0);
     log(
       cacheHit
@@ -3810,25 +4071,24 @@ function App() {
         : "synchronous-batch done; loading history before start",
     );
     requestAnimationFrame(() => log("first paint after click"));
-    startPromise.then(() => {
+    activeStartPromise.then(() => {
       if (isLatest()) log("subprocess ready");
     });
-    startPromise
+    activeStartPromise
       .catch((e) => {
         if (!isLatest()) return;
-        setSessionOn(false);
+        setPanelOn(panelId, false);
         markSessionActivity(sessionId, "error", "failed to start");
-        setEntries((es) => [
+        setEntriesForTranscript(sessionId, (es) => [
           ...es,
           { kind: "system", id: randomId(), text: `failed to start: ${e}` },
         ]);
         notifyErr("failed to start session")(e);
       })
       .finally(() => {
-        if (startPromiseRef.current === startPromise) {
+        if (startPromiseRef.current === activeStartPromise) {
           startPromiseRef.current = null;
         }
-        if (isLatest()) switchingSessionRef.current = false;
       });
 
     if (!cacheHit) {
@@ -3855,8 +4115,13 @@ function App() {
           toolUseMap,
           mtime_ms: mtime,
         });
-        toolUseMapRef.current = new Map(toolUseMap);
-        toolUseMapGlobal.current = toolUseMapRef.current;
+        const map = new Map(toolUseMap);
+        transcriptToolUseMapsRef.current.set(sessionId, map);
+        setToolUseMapForPanel(sessionId, map);
+        if (activePanelIdRef.current === panelId) {
+          toolUseMapRef.current = map;
+          toolUseMapGlobal.current = map;
+        }
         flushSync(() => {
           setEntries([
             ...history,
@@ -3881,44 +4146,48 @@ function App() {
   }
 
   async function stopSession() {
+    const panelId = activePanelIdRef.current;
     try {
-      await invoke("stop_session", { panelId: "main" });
+      await invoke("stop_session", { panelId });
     } finally {
       if (busy) markSessionActivity(activeSessionIdRef.current, "interrupted", "stopped");
-      setSessionOn(false);
-      setBusy(false);
+      setPanelOn(panelId, false);
+      setPanelBusy(panelId, false);
     }
   }
 
   async function interruptTurn() {
+    const panelId = activePanelIdRef.current;
     try {
-      await invoke("interrupt_session", { panelId: "main" });
+      await invoke("interrupt_session", { panelId });
       markSessionActivity(activeSessionIdRef.current, "interrupted", "interrupted");
     } catch (e) {
       console.error("interrupt failed", e);
     }
   }
 
-  // Hard reset: kill whatever subprocess the "main" panel has and
-  // respawn it in the active session. Used when a turn wedges and
+  // Hard reset: kill the active single-panel subprocess and respawn it
+  // in the active session. Used when a turn wedges and
   // interrupt alone doesn't bring the panel back.
   async function resetMainSession() {
+    const panelId = activePanelIdRef.current;
     setBusy(false);
     setStuckBusy(false);
     try {
-      await invoke("stop_session", { panelId: "main" });
+      await invoke("stop_session", { panelId });
     } catch {
       // ignore — we're about to respawn anyway
     }
+    setPanelOn(panelId, false);
+    setPanelBusy(panelId, false);
     try {
-      await invoke("start_session", {
-        panelId: "main",
-        cwd,
-        permissionMode,
-        model: model || null,
+      await startPanelSession({
+        panelId,
+        panelCwd: cwd,
+        panelPermissionMode: permissionMode,
+        panelModel: model || null,
         resumeId: activeSessionId || null,
       });
-      setSessionOn(true);
     } catch (e) {
       markSessionActivity(activeSessionIdRef.current, "error", "reset failed");
       setEntries((es) => [
@@ -3933,25 +4202,26 @@ function App() {
   // and attachment handling.
   async function sendQuickReply(text: string) {
     if (busy || !text) return;
+    const panelId = activePanelIdRef.current;
     requestSidebarEngagementTop(activeSessionIdRef.current);
-    if (startPromiseRef.current) {
+    const pendingStart = panelStartPromisesRef.current.get(panelId);
+    if (pendingStart) {
       try {
-        await startPromiseRef.current;
+        await pendingStart;
       } catch {
         // start failed — sessionOn was flipped back to false; fall
         // through to spawn a fresh subprocess below.
       }
     }
-    if (!sessionOn) {
+    if (!panelOnRef.current.get(panelId)) {
       try {
-        await invoke("start_session", {
-          panelId: "main",
-          cwd,
-          permissionMode,
-          model: model || null,
-          resumeId: null,
+        await startPanelSession({
+          panelId,
+          panelCwd: cwd,
+          panelPermissionMode: permissionMode,
+          panelModel: model || null,
+          resumeId: activeSessionId || null,
         });
-        setSessionOn(true);
       } catch (e) {
         markSessionActivity(activeSessionIdRef.current, "error", "failed to start");
         setEntries((es) => [
@@ -3967,13 +4237,13 @@ function App() {
       { kind: "user", id: randomId(), text },
     ]);
     lastUserMessageRef.current = text;
-    setBusy(true);
+    setPanelBusy(panelId, true);
     setStuckToBottom(true);
     setHasNewBelow(false);
     try {
-      await invoke("send_message", { panelId: "main", text });
+      await invoke("send_message", { panelId, text });
     } catch (e) {
-      setBusy(false);
+      setPanelBusy(panelId, false);
       markSessionActivity(activeSessionIdRef.current, "error", "send failed");
       setEntries((es) => [
         ...es,
@@ -3986,18 +4256,20 @@ function App() {
   async function send() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || busy) return;
+    const panelId = activePanelIdRef.current;
     requestSidebarEngagementTop(activeSessionIdRef.current);
 
-    if (startPromiseRef.current) {
+    const pendingStart = panelStartPromisesRef.current.get(panelId);
+    if (pendingStart) {
       try {
-        await startPromiseRef.current;
+        await pendingStart;
       } catch {
         // start failed — sessionOn was flipped back to false; fall
         // through to spawn a fresh subprocess below.
       }
     }
 
-    if (!sessionOn) {
+    if (!panelOnRef.current.get(panelId)) {
       try {
         // Resume the session the user is looking at if there is one;
         // otherwise start fresh. Previously we always passed
@@ -4005,14 +4277,13 @@ function App() {
         // brand-new subprocess pointed at a session the UI wasn't
         // displaying — leading to "thinking forever" on the visible
         // transcript.
-        await invoke("start_session", {
-          panelId: "main",
-          cwd,
-          permissionMode,
-          model: model || null,
+        await startPanelSession({
+          panelId,
+          panelCwd: cwd,
+          panelPermissionMode: permissionMode,
+          panelModel: model || null,
           resumeId: activeSessionId || null,
         });
-        setSessionOn(true);
       } catch (e) {
         markSessionActivity(activeSessionIdRef.current, "error", "failed to start");
         setEntries((es) => [
@@ -4035,13 +4306,13 @@ function App() {
       { kind: "user", id: randomId(), text: body },
     ]);
     lastUserMessageRef.current = body;
-    setBusy(true);
+    setPanelBusy(panelId, true);
     setStuckToBottom(true);
     setHasNewBelow(false);
     try {
-      await invoke("send_message", { panelId: "main", text: body });
+      await invoke("send_message", { panelId, text: body });
     } catch (e) {
-      setBusy(false);
+      setPanelBusy(panelId, false);
       markSessionActivity(activeSessionIdRef.current, "error", "send failed");
       setEntries((es) => [...es, { kind: "system", id: randomId(), text: `send failed: ${e}` }]);
       notifyErr("send failed")(e);
@@ -4771,7 +5042,9 @@ function App() {
                   // through immediately instead of waiting for the next
                   // session restart.
                   if (sessionOn) {
-                    setPermissionModeOnPanel("main", mode);
+                    const panelId = activePanelIdRef.current;
+                    panelPermissionModesRef.current.set(panelId, mode);
+                    setPermissionModeOnPanel(panelId, mode);
                   }
                 }}
               >
@@ -4950,6 +5223,7 @@ function App() {
                 aria-hidden={!isActive}
               >
                 <PlainTranscript
+                  panelId={id}
                   entries={slotEntries}
                   busy={isActive ? busy : false}
                   scrollRef={isActive ? transcriptScrollRef : noopScrollRef}
@@ -5000,20 +5274,27 @@ function App() {
             <PermissionPromptOverlay
               req={pendingPermission}
               onAllow={async () => {
-                await respondPermission("main", pendingPermission, true);
+                const panelId = activePanelIdRef.current;
+                await respondPermission(panelId, pendingPermission, true);
                 markSessionActivity(activeSessionIdRef.current, "running", "working");
+                panelPendingPermissionsRef.current.set(panelId, null);
                 setPendingPermission(null);
               }}
               onDeny={async () => {
-                await respondPermission("main", pendingPermission, false);
+                const panelId = activePanelIdRef.current;
+                await respondPermission(panelId, pendingPermission, false);
                 markSessionActivity(activeSessionIdRef.current, "running", "working");
+                panelPendingPermissionsRef.current.set(panelId, null);
                 setPendingPermission(null);
               }}
               onAllowAndBypass={async () => {
-                await respondPermission("main", pendingPermission, true);
-                await setPermissionModeOnPanel("main", "bypassPermissions");
+                const panelId = activePanelIdRef.current;
+                await respondPermission(panelId, pendingPermission, true);
+                await setPermissionModeOnPanel(panelId, "bypassPermissions");
+                panelPermissionModesRef.current.set(panelId, "bypassPermissions");
                 setPermissionMode("bypassPermissions");
                 markSessionActivity(activeSessionIdRef.current, "running", "working");
+                panelPendingPermissionsRef.current.set(panelId, null);
                 setPendingPermission(null);
               }}
             />
@@ -5027,20 +5308,23 @@ function App() {
                 // re-run the denied tool — claude already emitted a
                 // `result` and is idle. Flip the mode + resend the last
                 // user message so claude retries with the new mode.
+                const panelId = activePanelIdRef.current;
                 const resendText = lastUserMessageRef.current;
                 const sid = activeSessionId;
                 const useCwd = cwd;
                 setPendingDenials(null);
+                panelPendingDenialsRef.current.set(panelId, null);
+                panelPermissionModesRef.current.set(panelId, "bypassPermissions");
                 setPermissionMode("bypassPermissions");
                 try {
                   await invoke("start_session", {
-                    panelId: "main",
+                    panelId,
                     cwd: useCwd,
                     permissionMode: "bypassPermissions",
                     model: model || null,
                     resumeId: sid || null,
                   });
-                  setSessionOn(true);
+                  setPanelOn(panelId, true);
                   if (resendText) {
                     requestSidebarEngagementTop(sid);
                     setEntries((es) => [
@@ -5051,13 +5335,14 @@ function App() {
                         text: resendText,
                       },
                     ]);
-                    setBusy(true);
+                    setPanelBusy(panelId, true);
                     await invoke("send_message", {
-                      panelId: "main",
+                      panelId,
                       text: resendText,
                     });
                   }
                 } catch (e) {
+                  setPanelBusy(panelId, false);
                   markSessionActivity(sid, "error", "retry failed");
                   setEntries((es) => [
                     ...es,
@@ -10176,12 +10461,14 @@ const TRANSCRIPT_WINDOW = 12;
 const TRANSCRIPT_WINDOW_STEP = 20;
 
 const PlainTranscript = memo(function PlainTranscript({
+  panelId,
   entries,
   busy,
   scrollRef,
   onAtBottomChange,
   scrollToBottomToken,
 }: {
+  panelId: string;
   entries: Entry[];
   busy: boolean;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -10261,7 +10548,7 @@ const PlainTranscript = memo(function PlainTranscript({
       )}
       {visible.map((entry) => (
         <div key={entry.id} className="transcript-row">
-          <EntryView entry={entry} />
+          <EntryView entry={entry} panelId={panelId} />
         </div>
       ))}
       {busy && <TypingIndicator />}
