@@ -919,7 +919,7 @@ input:disabled, select:disabled, textarea:disabled {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 16px 20px 4px;
+  padding: 16px 20px 16px;
 }
 
 .transcript.plain {
@@ -1221,6 +1221,25 @@ body[data-resizing="true"] .grid-col-divider::before {
   overflow-y: auto;
   padding: 10px 12px;
   font-size: 12.5px;
+}
+
+.grid-panel-body .msg {
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.grid-panel-body .msg-assistant .msg-body,
+.grid-panel-body .markdown {
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.grid-panel-body .streaming-text p {
+  line-height: 1.55;
+}
+
+.grid-panel-body .tool-result {
+  margin-left: 58px;
 }
 
 .grid-panel-empty {
@@ -3173,9 +3192,9 @@ body[data-resizing="true"] .terminal-resizer::after {
 
 .msg {
   display: grid;
-  grid-template-columns: 80px 1fr;
-  gap: 16px;
-  padding: 8px 0;
+  grid-template-columns: 64px minmax(0, 820px);
+  gap: 14px;
+  padding: 7px 0;
 }
 
 .msg-role {
@@ -3193,6 +3212,11 @@ body[data-resizing="true"] .terminal-resizer::after {
 .msg-body {
   min-width: 0;
   color: var(--text);
+}
+
+.msg-assistant .msg-body {
+  font-size: 15px;
+  line-height: 1.65;
 }
 
 .msg-body p {
@@ -3221,7 +3245,7 @@ body[data-resizing="true"] .terminal-resizer::after {
   margin: 0 0 8px;
   white-space: pre-wrap;
   word-wrap: break-word;
-  line-height: 1.55;
+  line-height: 1.65;
 }
 
 .streaming-text p:last-child { margin-bottom: 0; }
@@ -3244,8 +3268,8 @@ body[data-resizing="true"] .terminal-resizer::after {
 /* ---------- markdown ---------- */
 
 .markdown {
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.65;
   color: var(--text);
 }
 
@@ -3448,6 +3472,17 @@ body[data-resizing="true"] .terminal-resizer::after {
   overflow: hidden;
 }
 
+.block.thinking > .markdown {
+  padding: 10px 12px;
+}
+
+.compact-drawer > summary .drawer-meta {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
 details.block > summary,
 details > summary {
   cursor: pointer;
@@ -3502,6 +3537,37 @@ details.block[open] > summary::before,
   border-left: 2px solid var(--tool);
   border-radius: 6px;
   overflow: hidden;
+}
+
+details.tool-block > summary.tool-head-row {
+  list-style: none;
+  cursor: pointer;
+  border-bottom: none;
+}
+
+details.tool-block[open] > summary.tool-head-row {
+  border-bottom: 1px solid var(--border);
+}
+
+details.tool-block > summary.tool-head-row::-webkit-details-marker {
+  display: none;
+}
+
+details.tool-block > summary.tool-head-row::before {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: 10px;
+  transition: transform 0.15s;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+details.tool-block[open] > summary.tool-head-row::before {
+  transform: rotate(90deg);
+}
+
+details.tool-block > summary.tool-head-row:hover {
+  background: color-mix(in srgb, var(--tool-soft) 76%, var(--bg-elev-2));
 }
 
 .tool-head-row {

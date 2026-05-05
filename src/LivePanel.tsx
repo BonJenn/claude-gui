@@ -576,12 +576,12 @@ export function LivePanel({
     };
   }, [panelId, handleEvent]);
 
-  // Auto-scroll to bottom when entries change if we were at/near bottom.
+  // Auto-scroll to bottom on streaming deltas too, not just new rows.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [entries.length, busy]);
+  }, [entries, busy]);
 
   const send = useCallback(async () => {
     const text = input.trim();
