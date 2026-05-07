@@ -8743,23 +8743,24 @@ function BlockView({ block }: { block: Block }) {
   if (block.type === "thinking") {
     const tb = block as ThinkingBlock;
     const t = tb.thinking ?? "";
-    if (tb._streaming) {
-      return (
-        <details className="block thinking" open>
-          <summary>thinking</summary>
-          <pre className="thinking-stream">{t}</pre>
-        </details>
-      );
-    }
     return (
-      <details className="block thinking" open>
-        <summary>thinking</summary>
-        <CompiledMarkdown
-          className="markdown"
-          text={t}
-          html={tb._html}
-          repo={tb._repo}
-        />
+      <details className="block thinking compact-drawer">
+        <summary>
+          <span>thinking</span>
+          <span className="drawer-meta">
+            {tb._streaming ? "typing" : summarizeTextSize(t)}
+          </span>
+        </summary>
+        {tb._streaming ? (
+          <pre className="thinking-stream">{t}</pre>
+        ) : (
+          <CompiledMarkdown
+            className="markdown"
+            text={t}
+            html={tb._html}
+            repo={tb._repo}
+          />
+        )}
       </details>
     );
   }
@@ -8820,10 +8821,9 @@ function ToolUseView({ block }: { block: ToolUseBlock }) {
 
   if (!input) {
     return (
-      <div className="tool-block">
-        <div className="tool-head-row">{header}</div>
+      <ToolDrawer summary={header}>
         {streaming && <div className="tool-waiting">receiving input…</div>}
-      </div>
+      </ToolDrawer>
     );
   }
 
@@ -8854,6 +8854,36 @@ function ToolUseView({ block }: { block: ToolUseBlock }) {
   }
 }
 
+function summarizeTextSize(text: string): string {
+  if (!text.trim()) return "empty";
+  const lines = text.split("\n").length;
+  if (lines > 1) return `${lines} lines`;
+  return `${text.length} chars`;
+}
+
+function ToolDrawer({
+  summary,
+  className,
+  children,
+}: {
+  summary: React.ReactNode;
+  className?: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <details
+      className={`tool-block compact-drawer${className ? ` ${className}` : ""}`}
+    >
+      <summary className="tool-head-row">{summary}</summary>
+      {children}
+    </details>
+  );
+}
+
+function RawToolInput({ input }: { input: Record<string, unknown> }) {
+  return <pre className="code-preview">{JSON.stringify(input, null, 2)}</pre>;
+}
+
 function BashUse({
   header,
   input,
@@ -8867,18 +8897,22 @@ function BashUse({
   const description = input.description ? String(input.description) : "";
   const runBg = Boolean(input.run_in_background);
   return (
-    <div className="tool-block bash">
-      <div className="tool-head-row">
-        {header}
-        {description && <span className="tool-subtitle">{description}</span>}
-        {runBg && <span className="tool-tag">bg</span>}
-      </div>
+    <ToolDrawer
+      className="bash"
+      summary={
+        <>
+          {header}
+          {description && <span className="tool-subtitle">{description}</span>}
+          {runBg && <span className="tool-tag">bg</span>}
+        </>
+      }
+    >
       <pre className="terminal">
         <span className="prompt">$ </span>
         <span className="cmd">{command}</span>
         {streaming && <span className="caret" />}
       </pre>
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -8897,12 +8931,19 @@ function ReadUse({
       ? ` (${offset ?? 0}–${offset != null && limit != null ? offset + limit : limit ?? "end"})`
       : "";
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-path">{path || "…"}{range}</span>
-      </div>
-    </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-path">
+            {path || "…"}
+            {range}
+          </span>
+        </>
+      }
+    >
+      <RawToolInput input={input} />
+    </ToolDrawer>
   );
 }
 
@@ -8918,14 +8959,17 @@ function EditUse({
   const newStr = String(input.new_string ?? "");
   const replaceAll = Boolean(input.replace_all);
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-path">{path || "…"}</span>
-        {replaceAll && <span className="tool-tag">all</span>}
-      </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-path">{path || "…"}</span>
+          {replaceAll && <span className="tool-tag">all</span>}
+        </>
+      }
+    >
       <DiffView oldStr={oldStr} newStr={newStr} />
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -8939,12 +8983,17 @@ function MultiEditUse({
   const path = String(input.file_path ?? "");
   const edits = (input.edits as Array<Record<string, unknown>>) ?? [];
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-path">{path || "…"}</span>
-        <span className="tool-tag">{edits.length} edit{edits.length === 1 ? "" : "s"}</span>
-      </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-path">{path || "…"}</span>
+          <span className="tool-tag">
+            {edits.length} edit{edits.length === 1 ? "" : "s"}
+          </span>
+        </>
+      }
+    >
       {edits.map((ed, i) => (
         <DiffView
           key={i}
@@ -8952,7 +9001,7 @@ function MultiEditUse({
           newStr={String(ed.new_string ?? "")}
         />
       ))}
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -8968,24 +9017,18 @@ function WriteUse({
   const path = String(input.file_path ?? "");
   const content = String(input.content ?? "");
   const lines = content.split("\n");
-  const preview = lines.slice(0, 20).join("\n");
-  const isLong = lines.length > 20;
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-path">{path || "…"}</span>
-        <span className="tool-tag">{lines.length} lines</span>
-      </div>
-      {isLong ? (
-        <details>
-          <summary>show content</summary>
-          <pre className="code-preview">{content}{streaming && <span className="caret" />}</pre>
-        </details>
-      ) : (
-        <pre className="code-preview">{preview}{streaming && <span className="caret" />}</pre>
-      )}
-    </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-path">{path || "…"}</span>
+          <span className="tool-tag">{lines.length} lines</span>
+        </>
+      }
+    >
+      <pre className="code-preview">{content}{streaming && <span className="caret" />}</pre>
+    </ToolDrawer>
   );
 }
 
@@ -8999,13 +9042,17 @@ function GlobUse({
   const pattern = String(input.pattern ?? "");
   const path = input.path ? String(input.path) : "";
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <code className="tool-code">{pattern || "…"}</code>
-        {path && <span className="tool-path">in {path}</span>}
-      </div>
-    </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <code className="tool-code">{pattern || "…"}</code>
+          {path && <span className="tool-path">in {path}</span>}
+        </>
+      }
+    >
+      <RawToolInput input={input} />
+    </ToolDrawer>
   );
 }
 
@@ -9022,14 +9069,18 @@ function GrepUse({
   const path = input.path ? String(input.path) : "";
   const filters = [glob, type].filter(Boolean).join(" ");
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <code className="tool-code">{pattern || "…"}</code>
-        {filters && <span className="tool-tag">{filters}</span>}
-        {path && <span className="tool-path">in {path}</span>}
-      </div>
-    </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <code className="tool-code">{pattern || "…"}</code>
+          {filters && <span className="tool-tag">{filters}</span>}
+          {path && <span className="tool-path">in {path}</span>}
+        </>
+      }
+    >
+      <RawToolInput input={input} />
+    </ToolDrawer>
   );
 }
 
@@ -9044,11 +9095,16 @@ function TodoWriteUse({
 }) {
   const todos = (input.todos as Todo[]) ?? [];
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-tag">{todos.length} task{todos.length === 1 ? "" : "s"}</span>
-      </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-tag">
+            {todos.length} task{todos.length === 1 ? "" : "s"}
+          </span>
+        </>
+      }
+    >
       <ul className="todos">
         {todos.map((t, i) => (
           <li key={i} className={`todo todo-${t.status}`}>
@@ -9059,7 +9115,7 @@ function TodoWriteUse({
           </li>
         ))}
       </ul>
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -9075,12 +9131,16 @@ function WebUse({
   const target =
     name === "WebFetch" ? String(input.url ?? "") : String(input.query ?? "");
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        <span className="tool-path">{target || "…"}</span>
-      </div>
-    </div>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          <span className="tool-path">{target || "…"}</span>
+        </>
+      }
+    >
+      <RawToolInput input={input} />
+    </ToolDrawer>
   );
 }
 
@@ -9095,19 +9155,21 @@ function TaskUse({
   const subagent = input.subagent_type ? String(input.subagent_type) : "";
   const prompt = String(input.prompt ?? "");
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">
-        {header}
-        {subagent && <span className="tool-tag">{subagent}</span>}
-        {description && <span className="tool-subtitle">{description}</span>}
-      </div>
-      {prompt && (
-        <details>
-          <summary>prompt</summary>
-          <pre className="code-preview">{prompt}</pre>
-        </details>
+    <ToolDrawer
+      summary={
+        <>
+          {header}
+          {subagent && <span className="tool-tag">{subagent}</span>}
+          {description && <span className="tool-subtitle">{description}</span>}
+        </>
+      }
+    >
+      {prompt ? (
+        <pre className="code-preview">{prompt}</pre>
+      ) : (
+        <RawToolInput input={input} />
       )}
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -9119,10 +9181,9 @@ function GenericUse({
   input: Record<string, unknown>;
 }) {
   return (
-    <div className="tool-block">
-      <div className="tool-head-row">{header}</div>
+    <ToolDrawer summary={header}>
       <pre className="code-preview">{JSON.stringify(input, null, 2)}</pre>
-    </div>
+    </ToolDrawer>
   );
 }
 
@@ -9192,10 +9253,9 @@ function ToolResultView({
   }
 
   const bodyClass = `tool-result-body ${name === "Bash" ? "terminal-out" : ""}`;
-  // Anything beyond a handful of lines is folded by default. Errors stay
-  // open so failures don't hide. <details>'s own toggle state is used so
-  // each individual result remembers its open/closed across re-renders.
-  const shouldFold = !isError && (lines.length > 4 || text.length > 240);
+  // Tool output is noise until the user asks for it. Errors stay open so
+  // failures don't hide.
+  const shouldFold = !isError && text.trim().length > 0;
   const firstLine = (lines.find((l) => l.trim().length > 0) || "").slice(0, 140);
   const foldSummary = firstLine
     ? `${firstLine}${lines.length > 1 ? " …" : ""}`
@@ -10476,6 +10536,7 @@ const PlainTranscript = memo(function PlainTranscript({
   scrollToBottomToken: number;
 }) {
   const [windowSize, setWindowSize] = useState(TRANSCRIPT_WINDOW);
+  const stickToBottomRef = useRef(true);
   // Stream new turns should auto-extend the window so live replies
   // don't get clipped by the "show older" affordance once the user
   // has started expanding it.
@@ -10488,12 +10549,29 @@ const PlainTranscript = memo(function PlainTranscript({
     if (!el) return;
     const onScroll = () => {
       const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
-      onAtBottomChange(distance < 48);
+      const atBottom = distance < 48;
+      stickToBottomRef.current = atBottom;
+      onAtBottomChange(atBottom);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
   }, [onAtBottomChange, scrollRef]);
+
+  useLayoutEffect(() => {
+    if (!stickToBottomRef.current && !busy) return;
+    let raf = 0;
+    const snap = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+      onAtBottomChange(true);
+    };
+    snap();
+    raf = requestAnimationFrame(snap);
+    return () => cancelAnimationFrame(raf);
+  }, [entries, busy, scrollRef, onAtBottomChange]);
 
   useLayoutEffect(() => {
     if (!scrollToBottomToken) return;
@@ -10503,6 +10581,7 @@ const PlainTranscript = memo(function PlainTranscript({
       const el = scrollRef.current;
       if (!el) return;
       el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
       onAtBottomChange(true);
     };
     snap();
