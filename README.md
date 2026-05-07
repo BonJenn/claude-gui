@@ -96,6 +96,9 @@ app launch, update checks, update starts, update completions, and update
 failures. The install identifier is generated locally and hashed by the server
 before storage. Users can turn this off in Settings.
 
+Release writeups live in `docs/blog/`, including the
+`0.1.3` post about steadier sessions and cleaner transcripts.
+
 ## How It Works
 
 The frontend is React and Vite. The desktop shell and native commands are Tauri
